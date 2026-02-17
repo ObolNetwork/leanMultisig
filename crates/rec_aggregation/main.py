@@ -1,5 +1,6 @@
 from recursion import *
 from xmss_aggregate import *
+from threshold_aggregate import *
 
 MAX_RECURSIONS = 16
 
@@ -15,7 +16,7 @@ def main():
     debug_assert(MAX_N_SIGS + MAX_N_DUPS <= 2**16) # because of range checking, TODO increase
     pub_mem = NONRESERVED_PROGRAM_INPUT_START
     n_sigs = pub_mem[0]
-    assert 1 < n_sigs
+    assert 0 < n_sigs
     assert n_sigs - 1 < MAX_N_SIGS
     pubkeys_hash_expected = pub_mem + 1
     message = pubkeys_hash_expected + DIGEST_LEN
@@ -31,11 +32,14 @@ def main():
     n_recursions = priv_start[0]
     assert n_recursions <= MAX_RECURSIONS
 
-    n_dup = priv_start[1]
+    n_threshold = priv_start[1]
+    assert n_threshold <= MAX_THRESHOLD_GROUPS
+
+    n_dup = priv_start[2]
     assert n_dup < MAX_N_SIGS # TODO increase
-    all_pubkeys = priv_start[2]
-    sub_slice_starts = priv_start + 3
-    bytecode_sumcheck_proof = sub_slice_starts[n_recursions + 1]
+    all_pubkeys = priv_start[3]
+    sub_slice_starts = priv_start + 4
+    bytecode_sumcheck_proof = sub_slice_starts[1 + n_threshold + n_recursions]
 
     computed_pubkeys_hash = slice_hash_dynamic_unroll(all_pubkeys, n_sigs * DIGEST_LEN, MAX_LOG_MEMORY_SIZE)
     copy_8(computed_pubkeys_hash, pubkeys_hash_expected)
@@ -62,12 +66,20 @@ def main():
         sig = raw_sigs + i * SIG_SIZE
         xmss_verify(pk, message, sig, slot_lo, slot_hi, merkle_chunks_for_slot)
 
+    # Threshold sources (between raw XMSS and recursive)
+    for t_idx in range(0, n_threshold):
+        threshold_data = sub_slice_starts[1 + t_idx]
+        global_idx = threshold_verify_group(all_pubkeys, threshold_data, message, slot_lo, slot_hi, merkle_chunks_for_slot)
+        assert global_idx < n_total
+        buffer[global_idx] = counter
+        counter += 1
+
     # Recursive sources
     n_bytecode_claims = n_recursions * 2
     bytecode_claims = Array(n_bytecode_claims)
 
     for rec_idx in range(0, n_recursions):
-        source_data = sub_slice_starts[rec_idx + 1]
+        source_data = sub_slice_starts[1 + n_threshold + rec_idx]
         n_sub = source_data[0]
         sub_indices = source_data + 1
         bytecode_value_hint = sub_indices + n_sub

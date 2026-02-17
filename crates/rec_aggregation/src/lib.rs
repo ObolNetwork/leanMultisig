@@ -9,6 +9,7 @@ use utils::{build_prover_state, poseidon_compress_slice, poseidon16_compress_pai
 use xmss::{
     LOG_LIFETIME, MESSAGE_LEN_FE, Poseidon16History, SIG_SIZE_FE, XmssPublicKey, XmssSignature, slot_to_field_elements,
     xmss_verify_with_poseidon_trace,
+    hypertree::{ThresholdGroup, ThresholdSignature, threshold_verify_with_poseidon_trace},
 };
 
 use serde::{Deserialize, Serialize};
@@ -26,8 +27,15 @@ const N_MERKLE_CHUNKS_FOR_SLOT: usize = LOG_LIFETIME / MERKLE_LEVELS_PER_CHUNK_F
 pub struct Digest(pub [F; DIGEST_LEN]);
 
 #[derive(Debug, Clone)]
+pub struct ThresholdGroupSpec {
+    pub k: usize,
+    pub n: usize,
+}
+
+#[derive(Debug, Clone)]
 pub struct AggregationTopology {
     pub raw_xmss: usize,
+    pub threshold_groups: Vec<ThresholdGroupSpec>,
     pub children: Vec<AggregationTopology>,
     pub log_inv_rate: usize,
 }
@@ -35,7 +43,8 @@ pub struct AggregationTopology {
 pub(crate) fn count_signers(topology: &AggregationTopology, overlap: usize) -> usize {
     let child_count: usize = topology.children.iter().map(|c| count_signers(c, overlap)).sum();
     let n_overlaps = topology.children.len().saturating_sub(1);
-    topology.raw_xmss + child_count - overlap * n_overlaps
+    // Each threshold group contributes 1 signer to the global pubkeys set
+    topology.raw_xmss + topology.threshold_groups.len() + child_count - overlap * n_overlaps
 }
 
 pub fn hash_pubkeys(pub_keys: &[Digest]) -> Digest {
@@ -168,6 +177,7 @@ pub fn verify_aggregation(
 pub fn aggregate(
     children: &[AggregatedSigs],
     mut raw_xmss: Vec<(XmssPublicKey, XmssSignature)>,
+    threshold_sigs: &[(ThresholdGroup, ThresholdSignature)],
     message: &[F; MESSAGE_LEN_FE],
     slot: u32,
     log_inv_rate: usize,
@@ -176,6 +186,7 @@ pub fn aggregate(
     raw_xmss.dedup_by(|(a, _), (b, _)| a.merkle_root == b.merkle_root);
 
     let n_recursions = children.len();
+    let n_threshold = threshold_sigs.len();
     let raw_count = raw_xmss.len();
     let whir_config = lean_prover::default_whir_config(log_inv_rate);
 
@@ -185,6 +196,9 @@ pub fn aggregate(
 
     // Build global_pub_keys as sorted deduplicated union
     let mut global_pub_keys: Vec<Digest> = raw_xmss.iter().map(|(pk, _)| Digest(pk.merkle_root)).collect();
+    for (group, _) in threshold_sigs {
+        global_pub_keys.push(Digest(group.root()));
+    }
     for child in children.iter() {
         assert!(child.pub_keys.is_sorted(), "child pub_keys must be sorted");
         global_pub_keys.extend_from_slice(&child.pub_keys);
@@ -278,9 +292,12 @@ pub fn aggregate(
     let public_memory = build_public_memory(&non_reserved_public_input);
 
     // Build private input
-    // Layout: [n_recursions, n_dup, ptr_pubkeys, ptr_source_0..n_recursions, ptr_bytecode_sumcheck,
+    // Layout: [n_recursions, n_threshold, n_dup, ptr_pubkeys,
+    //          ptr_source_0, ptr_threshold_0..t, ptr_recursive_0..n, ptr_bytecode_sumcheck,
     //          global_pubkeys, dup_pubkeys, source_blocks..., bytecode_sumcheck_proof]
-    let header_size = n_recursions + 5;
+    // header = 1 (n_recursions) + 1 (n_threshold) + 1 (n_dup) + 1 (ptr_pubkeys)
+    //        + 1 (ptr_source_0) + n_threshold + n_recursions + 1 (ptr_bytecode_sumcheck)
+    let header_size = n_threshold + n_recursions + 6;
     let pubkeys_start = public_memory.len() + header_size;
 
     // Build source blocks (also discovers duplicate pub_keys)
@@ -303,7 +320,41 @@ pub fn aggregate(
         source_blocks.push(block);
     }
 
-    // Sources 1..n_recursions: recursive children
+    // Threshold source blocks (between raw XMSS and recursive)
+    for (group, tsig) in threshold_sigs {
+        let root = Digest(group.root());
+        let pos = global_pub_keys.binary_search(&root).unwrap();
+        claimed.insert(root);
+
+        let mut block = vec![];
+        block.push(F::from_usize(tsig.signer_indices.len())); // k
+        block.push(F::from_usize(group.depth));
+        block.push(F::from_usize(pos)); // global_pubkey_idx
+
+        // Leaf indices
+        for &leaf_idx in &tsig.signer_indices {
+            block.push(F::from_usize(leaf_idx));
+        }
+        // Signer merkle roots (hints for in-circuit xmss_verify)
+        for &leaf_idx in &tsig.signer_indices {
+            block.extend_from_slice(&group.leaves()[leaf_idx]);
+        }
+        // XMSS signatures
+        for sig in &tsig.xmss_signatures {
+            block.extend(encode_xmss_signature(sig));
+        }
+        // Hypertree Merkle proofs
+        for &leaf_idx in &tsig.signer_indices {
+            let proof = group.merkle_proof(leaf_idx);
+            for sibling in &proof {
+                block.extend_from_slice(sibling);
+            }
+        }
+
+        source_blocks.push(block);
+    }
+
+    // Recursive children source blocks
     for (i, child) in children.iter().enumerate() {
         let mut block = vec![F::from_usize(child.pub_keys.len())];
         for key in &child.pub_keys {
@@ -340,10 +391,12 @@ pub fn aggregate(
     }
     let bytecode_sumcheck_proof_ptr = offset;
 
-    let mut private_input = vec![];
-    private_input.push(F::from_usize(n_recursions));
-    private_input.push(F::from_usize(n_dup));
-    private_input.push(F::from_usize(pubkeys_start));
+    let mut private_input = vec![
+        F::from_usize(n_recursions),
+        F::from_usize(n_threshold),
+        F::from_usize(n_dup),
+        F::from_usize(pubkeys_start),
+    ];
     for &ptr in &source_ptrs {
         private_input.push(F::from_usize(ptr));
     }
@@ -361,8 +414,8 @@ pub fn aggregate(
     }
     private_input.extend_from_slice(&final_sumcheck_transcript);
 
-    // TODO precompute all the other poseidons
-    let xmss_poseidons_16_precomputed = precompute_poseidons(&raw_xmss, message);
+    let xmss_poseidons_16_precomputed =
+        precompute_poseidons(&raw_xmss, threshold_sigs, message);
 
     let execution_proof = prove_execution(
         bytecode,
@@ -405,11 +458,20 @@ pub fn hash_bytecode_claims(claims: &[Evaluation<EF>]) -> [F; DIGEST_LEN] {
 #[instrument(skip_all)]
 fn precompute_poseidons(
     raw_signers: &[(XmssPublicKey, XmssSignature)],
+    threshold_sigs: &[(ThresholdGroup, ThresholdSignature)],
     message: &[F; MESSAGE_LEN_FE],
 ) -> Poseidon16History {
-    let traces: Vec<_> = raw_signers
+    let raw_traces: Vec<_> = raw_signers
         .par_iter()
         .map(|(pub_key, sig)| xmss_verify_with_poseidon_trace(pub_key, message, sig).unwrap())
         .collect();
-    traces.into_par_iter().flatten().collect()
+    let threshold_traces: Vec<_> = threshold_sigs
+        .par_iter()
+        .map(|(group, tsig)| threshold_verify_with_poseidon_trace(group, tsig, message).unwrap())
+        .collect();
+    raw_traces
+        .into_par_iter()
+        .chain(threshold_traces.into_par_iter())
+        .flatten()
+        .collect()
 }

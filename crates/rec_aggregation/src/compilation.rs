@@ -15,6 +15,7 @@ use std::sync::OnceLock;
 use sub_protocols::{min_stacked_n_vars, total_whir_statements};
 use tracing::instrument;
 use utils::{BYTECODE_TABLE_INDEX, Counter, MEMORY_TABLE_INDEX};
+use xmss::hypertree::MAX_HYPERTREE_DEPTH;
 use xmss::{LOG_LIFETIME, MESSAGE_LEN_FE, RANDOMNESS_LEN_FE, TARGET_SUM, V, V_GRINDING, W};
 
 use crate::{MERKLE_LEVELS_PER_CHUNK_FOR_SLOT, N_MERKLE_CHUNKS_FOR_SLOT};
@@ -367,6 +368,13 @@ fn build_replacements(
         "MERKLE_LEVELS_PER_CHUNK_PLACEHOLDER".to_string(),
         MERKLE_LEVELS_PER_CHUNK_FOR_SLOT.to_string(),
     );
+
+    // Threshold replacements
+    replacements.insert(
+        "MAX_THRESHOLD_DEPTH_PLACEHOLDER".to_string(),
+        MAX_HYPERTREE_DEPTH.to_string(),
+    );
+    replacements.insert("MAX_THRESHOLD_GROUPS_PLACEHOLDER".to_string(), "8".to_string());
 
     // Bytecode zero eval
     replacements.insert(
