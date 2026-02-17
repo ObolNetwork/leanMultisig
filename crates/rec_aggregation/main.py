@@ -1,5 +1,6 @@
 from recursion import *
 from xmss_aggregate import *
+from threshold_aggregate import *
 
 MAX_RECURSIONS = 16
 
@@ -31,11 +32,14 @@ def main():
     n_recursions = priv_start[0]
     assert n_recursions <= MAX_RECURSIONS
 
-    n_dup = priv_start[1]
+    n_threshold = priv_start[1]
+    assert n_threshold <= MAX_THRESHOLD_GROUPS
+
+    n_dup = priv_start[2]
     assert n_dup < MAX_N_SIGS # TODO increase
-    all_pubkeys = priv_start[2]
-    sub_slice_starts = priv_start + 3
-    bytecode_sumcheck_proof = sub_slice_starts[n_recursions + 1]
+    all_pubkeys = priv_start[3]
+    sub_slice_starts = priv_start + 4
+    bytecode_sumcheck_proof = sub_slice_starts[1 + n_threshold + n_recursions]
 
     computed_pubkeys_hash = slice_hash_with_iv_dynamic_unroll(all_pubkeys, n_sigs * DIGEST_LEN, MAX_LOG_MEMORY_SIZE)
     copy_8(computed_pubkeys_hash, pubkeys_hash_expected)
@@ -62,12 +66,20 @@ def main():
         hint_xmss(sig)
         xmss_verify(pk, message, sig, slot_lo, slot_hi, merkle_chunks_for_slot)
 
+    # Threshold sources (between raw XMSS and recursive)
+    for t_idx in range(0, n_threshold):
+        threshold_data = sub_slice_starts[1 + t_idx]
+        global_idx = threshold_verify_group(all_pubkeys, threshold_data, message, slot_lo, slot_hi, merkle_chunks_for_slot)
+        assert global_idx < n_total
+        buffer[global_idx] = counter
+        counter += 1
+
     # Recursive sources
     n_bytecode_claims = n_recursions * 2
     bytecode_claims = Array(n_bytecode_claims)
 
     for rec_idx in range(0, n_recursions):
-        source_data = sub_slice_starts[rec_idx + 1]
+        source_data = sub_slice_starts[1 + n_threshold + rec_idx]
         n_sub = source_data[0]
         assert n_sub != 0
         assert n_sub < MAX_N_SIGS

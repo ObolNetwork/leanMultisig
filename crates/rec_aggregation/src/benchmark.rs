@@ -3,14 +3,17 @@ use std::time::Instant;
 
 use backend::*;
 use lean_vm::*;
+use rand::SeedableRng;
+use rand::rngs::StdRng;
 use utils::pretty_integer;
+use xmss::hypertree::{ThresholdGroup, ThresholdSignature};
 use xmss::signers_cache::*;
-use xmss::{XmssPublicKey, XmssSignature};
+use xmss::{XmssPublicKey, XmssSignature, xmss_key_gen, xmss_sign};
 
 use utils::ansi as s;
 
 use crate::compilation::{get_aggregation_bytecode, init_aggregation_bytecode};
-use crate::{AggregatedXMSS, AggregationTopology, count_signers, xmss_aggregate};
+use crate::{AggregatedXMSS, AggregationTopology, ThresholdGroupSpec, count_signers, xmss_aggregate, xmss_verify_aggregation};
 
 fn count_nodes(topology: &AggregationTopology) -> usize {
     1 + topology.children.iter().map(count_nodes).sum::<usize>()
@@ -154,7 +157,8 @@ fn build_tree_descs(
     let (icon, icon_color) = if is_leaf { ("◇", s::ORG) } else { ("◆", s::PUR) };
     let reduced = if n_children > 1 { overlap * (n_children - 1) } else { 0 };
     let children_sum: usize = topology.children.iter().map(|c| count_signers(c, overlap)).sum();
-    let detail = if is_leaf {
+    let n_threshold = topology.threshold_groups.len();
+    let detail = if is_leaf && n_threshold == 0 {
         format!("{}{}{}", s::GRN, n_sigs, s::R)
     } else {
         let mut parts: Vec<String> = vec![];
@@ -164,12 +168,15 @@ fn build_tree_descs(
         if topology.raw_xmss > 0 {
             parts.push(format!("{}+ {}{}", s::GRN, topology.raw_xmss, s::R));
         }
+        for spec in &topology.threshold_groups {
+            parts.push(format!("{}+ T({}/{}){}", s::CYN, spec.k, spec.n, s::R));
+        }
         if reduced > 0 {
             parts.push(format!("{}- {}{}", s::RED, reduced, s::R));
         }
         parts.join(" ")
     };
-    let plain_detail = if is_leaf {
+    let plain_detail = if is_leaf && n_threshold == 0 {
         format!("{}", n_sigs)
     } else {
         let mut parts: Vec<String> = vec![];
@@ -178,6 +185,9 @@ fn build_tree_descs(
         }
         if topology.raw_xmss > 0 {
             parts.push(format!("+ {}", topology.raw_xmss));
+        }
+        for spec in &topology.threshold_groups {
+            parts.push(format!("+ T({}/{})", spec.k, spec.n));
         }
         if reduced > 0 {
             parts.push(format!("- {}", reduced));
@@ -214,6 +224,37 @@ fn build_tree_descs(
     let plain = format!("{}{} {}{}", plain_prefix, icon, plain_detail, plain_rate_tag);
     plain_lens.push(plain.chars().count());
     descs.push(desc);
+}
+
+fn generate_threshold_test_data(
+    spec: &ThresholdGroupSpec,
+    message: &[F; xmss::MESSAGE_LEN_FE],
+    slot: u32,
+    seed_offset: usize,
+) -> (ThresholdGroup, ThresholdSignature) {
+    let mut rng = StdRng::seed_from_u64((10_000 + seed_offset) as u64);
+    let mut roots = Vec::new();
+    let mut secret_keys = Vec::new();
+    for _ in 0..spec.n {
+        let seed: [u8; 32] = rand::Rng::random(&mut rng);
+        let (sk, pk) = xmss_key_gen(seed, slot.saturating_sub(2), slot + 2).unwrap();
+        roots.push(pk.merkle_root);
+        secret_keys.push(sk);
+    }
+    let group = ThresholdGroup::new(spec.k, &roots);
+
+    // Sign with the first k signers
+    let signer_indices: Vec<usize> = (0..spec.k).collect();
+    let xmss_signatures: Vec<_> = signer_indices
+        .iter()
+        .map(|&i| xmss_sign(&mut rng, &secret_keys[i], message, slot).unwrap())
+        .collect();
+
+    let tsig = ThresholdSignature {
+        signer_indices,
+        xmss_signatures,
+    };
+    (group, tsig)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -255,8 +296,16 @@ fn build_aggregation(
         }
     }
 
+    // Generate threshold groups from topology specs
+    let threshold_sigs: Vec<(ThresholdGroup, ThresholdSignature)> = topology
+        .threshold_groups
+        .iter()
+        .enumerate()
+        .map(|(spec_idx, spec)| generate_threshold_test_data(spec, &message, slot, spec_idx))
+        .collect();
+
     let time = Instant::now();
-    let result = xmss_aggregate(&child_results, raw_xmss, &message, slot, topology.log_inv_rate);
+    let result = xmss_aggregate(&child_results, raw_xmss, &threshold_sigs, &message, slot, topology.log_inv_rate);
     let elapsed = time.elapsed();
 
     if tracing {

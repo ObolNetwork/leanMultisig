@@ -1,4 +1,5 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
+pub mod hypertree;
 pub mod signers_cache;
 mod wots;
 use backend::KoalaBear;
