@@ -37,6 +37,12 @@ enum Cli {
         #[arg(long, help = "Uses Conjecture 4.12 from WHIR (up to capacity)")]
         prox_gaps_conjecture: bool,
     },
+    #[command(about = "Run a fancy threshold aggregation topology")]
+    FancyThresholdAggregation {
+        // TODO use the latest results (i.e. update the conjecture)
+        #[arg(long, help = "Uses Conjecture 4.12 from WHIR (up to capacity)")]
+        prox_gaps_conjecture: bool,
+    },
     #[command(about = "Aggregate a threshold group (k-of-n XMSS)")]
     Threshold {
         #[arg(long, help = "Threshold (minimum signers required)")]
@@ -145,6 +151,85 @@ fn main() {
             };
             run_aggregation_benchmark(&topology, 5, false);
         }
+        
+        Cli::FancyThresholdAggregation { prox_gaps_conjecture } => {
+            let topology = AggregationTopology {
+                raw_xmss: 10,
+                threshold_groups: vec![],
+                children: vec![AggregationTopology {
+                    // Scenario 1: Replace a large raw XMSS leaf with a threshold group
+                    raw_xmss: 0,
+                    threshold_groups: vec![
+                        ThresholdGroupSpec {k: 3, n: 4},
+                        ThresholdGroupSpec {k: 3, n: 4},
+                    ],
+                    children: vec![
+                        AggregationTopology {
+                            raw_xmss: 0,
+                            threshold_groups: vec![],
+                            children: vec![AggregationTopology {
+                                raw_xmss: 25,
+                                threshold_groups: vec![],
+                                children: vec![
+                                    AggregationTopology {
+                                        raw_xmss: 1400,
+                                        threshold_groups: vec![],
+                                        children: vec![],
+                                        log_inv_rate: 1,
+                                    },
+                                    AggregationTopology {
+                                        raw_xmss: 1390,
+                                        threshold_groups: vec![
+                                            ThresholdGroupSpec {k: 3, n: 4};
+                                            10
+                                        ],
+                                        children: vec![],
+                                        log_inv_rate: 1,
+                                    },
+                                    AggregationTopology {
+                                        raw_xmss: 1300,
+                                        threshold_groups: vec![
+                                            ThresholdGroupSpec {k: 3, n: 4};
+                                            100
+                                        ],
+                                        children: vec![],
+                                        log_inv_rate: 1,
+                                    },
+                                ],
+                                log_inv_rate: 1,
+                            }],
+                            log_inv_rate: 3,
+                        },
+                        AggregationTopology {
+                            raw_xmss: 0,
+                            threshold_groups: vec![],
+                            children: vec![
+                                AggregationTopology {
+                                    raw_xmss: 1400,
+                                    threshold_groups: vec![],
+                                    children: vec![],
+                                    log_inv_rate: 2,
+                                },
+                                AggregationTopology {
+                                    raw_xmss: 1300,
+                                    threshold_groups: vec![
+                                        ThresholdGroupSpec {k: 4, n: 7};
+                                        100
+                                    ],
+                                    children: vec![],
+                                    log_inv_rate: 2,
+                                },
+                            ],
+                            log_inv_rate: 2,
+                        },
+                    ],
+                    log_inv_rate: 1,
+                }],
+                log_inv_rate: 4,
+            };
+            run_aggregation_benchmark(&topology, 5, prox_gaps_conjecture, false);
+        }
+
         Cli::Threshold {
             k,
             n,

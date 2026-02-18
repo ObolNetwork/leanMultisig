@@ -168,8 +168,8 @@ fn build_tree_descs(
         if topology.raw_xmss > 0 {
             parts.push(format!("{}+ {}{}", s::GRN, topology.raw_xmss, s::R));
         }
-        for spec in &topology.threshold_groups {
-            parts.push(format!("{}+ T({}/{}){}", s::CYN, spec.k, spec.n, s::R));
+        if n_threshold > 0 {
+            parts.push(format!("{}+ {}T{}", s::CYN, n_threshold, s::R));
         }
         if reduced > 0 {
             parts.push(format!("{}- {}{}", s::RED, reduced, s::R));
@@ -186,8 +186,8 @@ fn build_tree_descs(
         if topology.raw_xmss > 0 {
             parts.push(format!("+ {}", topology.raw_xmss));
         }
-        for spec in &topology.threshold_groups {
-            parts.push(format!("+ T({}/{})", spec.k, spec.n));
+        if n_threshold > 0 {
+            parts.push(format!("+ {}T", n_threshold));
         }
         if reduced > 0 {
             parts.push(format!("- {}", reduced));
