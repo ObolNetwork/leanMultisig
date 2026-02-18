@@ -374,7 +374,7 @@ fn build_replacements(
         "MAX_THRESHOLD_DEPTH_PLACEHOLDER".to_string(),
         MAX_HYPERTREE_DEPTH.to_string(),
     );
-    replacements.insert("MAX_THRESHOLD_GROUPS_PLACEHOLDER".to_string(), "8".to_string());
+    replacements.insert("MAX_THRESHOLD_GROUPS_PLACEHOLDER".to_string(), "100".to_string());
 
     // Bytecode zero eval
     replacements.insert(
