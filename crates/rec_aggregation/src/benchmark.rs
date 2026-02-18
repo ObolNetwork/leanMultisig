@@ -11,7 +11,7 @@ use xmss::signers_cache::*;
 use xmss::{XmssPublicKey, XmssSignature, xmss_key_gen, xmss_sign};
 
 use crate::compilation::{get_aggregation_bytecode, init_aggregation_bytecode};
-use crate::{AggregatedSigs, AggregationTopology, ThresholdGroupSpec, aggregate, count_signers, verify_aggregation};
+use crate::{AggregatedSigs, AggregationTopology, ThresholdGroupSpec, aggregate, count_signers};
 
 fn count_nodes(topology: &AggregationTopology) -> usize {
     1 + topology.children.iter().map(count_nodes).sum::<usize>()
@@ -277,6 +277,7 @@ fn build_aggregation(
     pub_keys: &[XmssPublicKey],
     signatures: &[XmssSignature],
     overlap: usize,
+    prox_gaps_conjecture: bool,
     tracing: bool,
 ) -> AggregatedSigs {
     let message = message_for_benchmark();
@@ -298,6 +299,7 @@ fn build_aggregation(
             &pub_keys[child_start..child_start + child_count],
             &signatures[child_start..child_start + child_count],
             overlap,
+            prox_gaps_conjecture,
             tracing,
         );
         child_results.push(child_agg);
@@ -324,7 +326,6 @@ fn build_aggregation(
         &message,
         slot,
         topology.log_inv_rate,
-        prox_gaps_conjecture,
     );
     let elapsed = time.elapsed();
 
@@ -361,7 +362,7 @@ fn build_aggregation(
     result
 }
 
-pub fn run_aggregation_benchmark(topology: &AggregationTopology, overlap: usize, tracing: bool) {
+pub fn run_aggregation_benchmark(topology: &AggregationTopology, overlap: usize, prox_gaps_conjecture: bool, tracing: bool) {
     if tracing {
         utils::init_tracing();
     }
@@ -393,7 +394,7 @@ pub fn run_aggregation_benchmark(topology: &AggregationTopology, overlap: usize,
         display.print_initial();
     }
 
-    let aggregated_sigs = build_aggregation(topology, 0, &mut display, &pub_keys, &signatures, overlap, tracing);
+    let aggregated_sigs = build_aggregation(topology, 0, &mut display, &pub_keys, &signatures, overlap, prox_gaps_conjecture, tracing);
 
     // Verify root proof
     let message = message_for_benchmark();

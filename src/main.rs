@@ -74,7 +74,7 @@ fn main() {
                 children: vec![],
                 log_inv_rate,
             };
-            run_aggregation_benchmark(&topology, 0, tracing);
+            run_aggregation_benchmark(&topology, 0, false, tracing);
         }
         Cli::Recursion {
             n,
@@ -95,7 +95,7 @@ fn main() {
                 ],
                 log_inv_rate,
             };
-            run_aggregation_benchmark(&topology, 0, tracing);
+            run_aggregation_benchmark(&topology, 0, false, tracing);
         }
         Cli::Poseidon {
             log_n_perms: log_count,
@@ -149,9 +149,9 @@ fn main() {
                 }],
                 log_inv_rate: 4,
             };
-            run_aggregation_benchmark(&topology, 5, false);
+            run_aggregation_benchmark(&topology, 5, prox_gaps_conjecture, false);
         }
-        
+
         Cli::FancyThresholdAggregation { prox_gaps_conjecture } => {
             let topology = AggregationTopology {
                 raw_xmss: 10,
