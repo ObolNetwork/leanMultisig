@@ -265,6 +265,7 @@ fn build_aggregation(
     pub_keys: &[XmssPublicKey],
     signatures: &[XmssSignature],
     overlap: usize,
+    prox_gaps_conjecture: bool,
     tracing: bool,
 ) -> (AggregatedXMSS, f64) {
     let message = message_for_benchmark();
@@ -286,6 +287,7 @@ fn build_aggregation(
             &pub_keys[child_start..child_start + child_count],
             &signatures[child_start..child_start + child_count],
             overlap,
+            prox_gaps_conjecture,
             tracing,
         );
         child_results.push(child_agg);
