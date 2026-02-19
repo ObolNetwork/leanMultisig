@@ -15,13 +15,15 @@ use xmss::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-use crate::compilation::get_aggregation_bytecode;
+use crate::compilation::{get_aggregation_bytecode};
 
 pub mod benchmark;
 pub mod compilation;
 
 const MERKLE_LEVELS_PER_CHUNK_FOR_SLOT: usize = 4;
 const N_MERKLE_CHUNKS_FOR_SLOT: usize = LOG_LIFETIME / MERKLE_LEVELS_PER_CHUNK_FOR_SLOT;
+/// Maximum threshold groups per aggregation node; must match MAX_THRESHOLD_GROUPS_PLACEHOLDER.
+pub const MAX_THRESHOLD_GROUPS: usize = 100;
 
 #[derive(Debug, Clone)]
 pub struct ThresholdGroupSpec {
@@ -453,6 +455,27 @@ pub fn extract_bytecode_claim_from_public_input(public_input: &[F], bytecode_poi
     let point = MultilinearPoint(packed[..bytecode_point_n_vars].to_vec());
     let value = packed[bytecode_point_n_vars];
     Evaluation::new(point, value)
+}
+
+/// A standalone proof that a threshold group's k-of-n policy was satisfied for a given message.
+/// Produced by [`prove_threshold`] from [`compilation::get_threshold_bytecode`].
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ThresholdAggregatedSig {
+    /// The hypertree root that was proven (= the group's public key).
+    pub threshold_root: Digest,
+    /// The minimum number of signers required (k), committed to the public input.
+    pub minimum_k: usize,
+    /// The ZK proof.
+    pub proof: PrunedProof<F>,
+    // benchmark / debug purpose
+    #[serde(skip, default)]
+    pub metadata: Option<ExecutionMetadata>,
+}
+
+impl ThresholdAggregatedSig {
+    pub fn proof_size_kib(&self) -> usize {
+        self.proof.proof_size_fe() * F::bits() / (8 * 1024)
+    }
 }
 
 pub fn hash_bytecode_claims(claims: &[Evaluation<EF>]) -> [F; DIGEST_LEN] {

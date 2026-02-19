@@ -12,31 +12,124 @@ use std::sync::OnceLock;
 use sub_protocols::{min_stacked_n_vars, total_whir_statements};
 use tracing::instrument;
 use utils::Counter;
-use xmss::hypertree::MAX_HYPERTREE_DEPTH;
 use xmss::{LOG_LIFETIME, MESSAGE_LEN_FE, RANDOMNESS_LEN_FE, TARGET_SUM, V, V_GRINDING, W};
+use xmss::hypertree::MAX_HYPERTREE_DEPTH;
 
 use crate::{MERKLE_LEVELS_PER_CHUNK_FOR_SLOT, MAX_THRESHOLD_GROUPS, N_MERKLE_CHUNKS_FOR_SLOT};
 
-static BYTECODE: OnceLock<Bytecode> = OnceLock::new();
+static BYTECODE_DEFAULT: OnceLock<Bytecode> = OnceLock::new();
+static BYTECODE_CONJECTURE: OnceLock<Bytecode> = OnceLock::new();
+static THRESHOLD_BYTECODE_DEFAULT: OnceLock<Bytecode> = OnceLock::new();
+static THRESHOLD_BYTECODE_CONJECTURE: OnceLock<Bytecode> = OnceLock::new();
 
 pub(crate) fn get_aggregation_bytecode() -> &'static Bytecode {
-    BYTECODE
+    BYTECODE_DEFAULT
         .get()
+        .or_else(|| BYTECODE_CONJECTURE.get())
         .unwrap_or_else(|| panic!("call init_aggregation_bytecode() first"))
 }
 
-pub fn init_aggregation_bytecode() {
-    BYTECODE.get_or_init(compile_main_program_self_referential);
+pub(crate) fn get_aggregation_bytecode_for(prox_gaps_conjecture: bool) -> &'static Bytecode {
+    if prox_gaps_conjecture {
+        &BYTECODE_CONJECTURE
+    } else {
+        &BYTECODE_DEFAULT
+    }
+    .get()
+    .unwrap_or_else(|| panic!("call init_aggregation_bytecode() first"))
 }
 
-fn compile_main_program(inner_program_log_size: usize, bytecode_zero_eval: F) -> Bytecode {
+pub fn get_threshold_bytecode(prox_gaps_conjecture: bool) -> &'static Bytecode {
+    if prox_gaps_conjecture {
+        &THRESHOLD_BYTECODE_CONJECTURE
+    } else {
+        &THRESHOLD_BYTECODE_DEFAULT
+    }
+    .get()
+    .unwrap_or_else(|| panic!("call init_threshold_bytecode() first"))
+}
+
+pub fn init_aggregation_bytecode() {
+    rayon::join(
+        || {
+            BYTECODE_DEFAULT.get_or_init(|| compile_main_program_self_referential(false));
+        },
+        || {
+            BYTECODE_CONJECTURE.get_or_init(|| compile_main_program_self_referential(true));
+        },
+    );
+}
+
+pub fn init_threshold_bytecode() {
+    rayon::join(
+        || {
+            THRESHOLD_BYTECODE_DEFAULT.get_or_init(|| compile_threshold_program_self_referential(false));
+        },
+        || {
+            THRESHOLD_BYTECODE_CONJECTURE.get_or_init(|| compile_threshold_program_self_referential(true));
+        },
+    );
+}
+
+fn compile_threshold_program(log_size_guess: usize, bytecode_zero_eval: F) -> Bytecode {
+    let bytecode_point_n_vars = log_size_guess + log2_ceil_usize(N_INSTRUCTION_COLUMNS);
+    let claim_data_size = (bytecode_point_n_vars + 1) * DIMENSION;
+    // public input layout: threshold_root(DIGEST_LEN) + minimum_k(1) + message(MESSAGE_LEN_FE)
+    //                    + slot_lo(1) + slot_hi(1) + merkle_chunks + bytecode_claim
+    let pub_input_size = DIGEST_LEN + 1 + MESSAGE_LEN_FE + 2 + N_MERKLE_CHUNKS_FOR_SLOT + claim_data_size;
+    let mut replacements = BTreeMap::new();
+    replacements.insert("N_INSTRUCTION_COLUMNS_PLACEHOLDER".to_string(), N_INSTRUCTION_COLUMNS.to_string());
+    replacements.insert("LOG_GUEST_BYTECODE_LEN_PLACEHOLDER".to_string(), log_size_guess.to_string());
+    replacements.insert("BYTECODE_ZERO_EVAL_PLACEHOLDER".to_string(), bytecode_zero_eval.as_canonical_u64().to_string());
+    replacements.insert("NONRESERVED_PROGRAM_INPUT_START_PLACEHOLDER".to_string(), NONRESERVED_PROGRAM_INPUT_START.to_string());
+    replacements.insert("MAX_THRESHOLD_GROUPS_PLACEHOLDER".to_string(), MAX_THRESHOLD_GROUPS.to_string());
+    replacements.insert("MAX_THRESHOLD_DEPTH_PLACEHOLDER".to_string(), MAX_HYPERTREE_DEPTH.to_string());
+    // XMSS params (needed by threshold_aggregate.py → xmss_aggregate.py)
+    replacements.insert("V_PLACEHOLDER".to_string(), V.to_string());
+    replacements.insert("V_GRINDING_PLACEHOLDER".to_string(), V_GRINDING.to_string());
+    replacements.insert("W_PLACEHOLDER".to_string(), W.to_string());
+    replacements.insert("TARGET_SUM_PLACEHOLDER".to_string(), TARGET_SUM.to_string());
+    replacements.insert("LOG_LIFETIME_PLACEHOLDER".to_string(), LOG_LIFETIME.to_string());
+    replacements.insert("MESSAGE_LEN_PLACEHOLDER".to_string(), MESSAGE_LEN_FE.to_string());
+    replacements.insert("RANDOMNESS_LEN_PLACEHOLDER".to_string(), RANDOMNESS_LEN_FE.to_string());
+    replacements.insert("MERKLE_LEVELS_PER_CHUNK_PLACEHOLDER".to_string(), MERKLE_LEVELS_PER_CHUNK_FOR_SLOT.to_string());
+    // Note: inner_public_memory_log_size is not needed by threshold_main.py itself
+    let _ = pub_input_size; // used only for documentation; inner mem size not needed without recursion
+    let filepath = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("threshold_main.py")
+        .to_str()
+        .unwrap()
+        .to_string();
+    compile_program_with_flags(&ProgramSource::Filepath(filepath), CompilationFlags { replacements })
+}
+
+#[instrument(skip_all)]
+fn compile_threshold_program_self_referential(_prox_gaps_conjecture: bool) -> Bytecode {
+    let mut log_size_guess = 16;
+    loop {
+        let bytecode = compile_threshold_program(log_size_guess, F::ZERO);
+        let actual_log_size = bytecode.log_size();
+        if actual_log_size == log_size_guess {
+            let bytecode_zero_eval = bytecode.instructions_multilinear[0];
+            return compile_threshold_program(actual_log_size, bytecode_zero_eval);
+        }
+        log_size_guess = actual_log_size;
+    }
+}
+
+fn compile_main_program(inner_program_log_size: usize, prox_gaps_conjecture: bool, bytecode_zero_eval: F) -> Bytecode {
     let bytecode_point_n_vars = inner_program_log_size + log2_ceil_usize(N_INSTRUCTION_COLUMNS);
     let claim_data_size = (bytecode_point_n_vars + 1) * DIMENSION;
     // pub_input layout: n_sigs(1) + slice_hash(8) + slot_low(1) + slot_high(1)
     //                   + message + merkle_chunks_for_slot + bytecode_claim
     let pub_input_size = 1 + DIGEST_LEN + 2 + MESSAGE_LEN_FE + N_MERKLE_CHUNKS_FOR_SLOT + claim_data_size;
     let inner_public_memory_log_size = log2_ceil_usize(NONRESERVED_PROGRAM_INPUT_START + pub_input_size);
-    let replacements = build_replacements(inner_program_log_size, inner_public_memory_log_size, bytecode_zero_eval);
+    let replacements = build_replacements(
+        inner_program_log_size,
+        inner_public_memory_log_size,
+        prox_gaps_conjecture,
+        bytecode_zero_eval,
+    );
 
     let filepath = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("main.py")
@@ -47,20 +140,15 @@ fn compile_main_program(inner_program_log_size: usize, bytecode_zero_eval: F) ->
 }
 
 #[instrument(skip_all)]
-fn compile_main_program_self_referential() -> Bytecode {
-    let mut log_size_guess = 19;
-    let bytecode_zero_eval = F::ONE;
+fn compile_main_program_self_referential(prox_gaps_conjecture: bool) -> Bytecode {
+    let mut log_size_guess = 20;
     loop {
-        let bytecode = compile_main_program(log_size_guess, bytecode_zero_eval);
-        assert_eq!(bytecode_zero_eval, bytecode.instructions_multilinear[0]);
+        let bytecode = compile_main_program(log_size_guess, prox_gaps_conjecture, F::ZERO);
         let actual_log_size = bytecode.log_size();
         if actual_log_size == log_size_guess {
-            return bytecode;
-        } else {
-            println!(
-                "Wrong guess at `compile_main_program_self_referential`, should be {} instead of {}, recompiling...",
-                actual_log_size, log_size_guess
-            );
+            // Now recompile with the correct bytecode_zero_eval
+            let bytecode_zero_eval = bytecode.instructions_multilinear[0];
+            return compile_main_program(actual_log_size, prox_gaps_conjecture, bytecode_zero_eval);
         }
         log_size_guess = actual_log_size;
     }
@@ -69,6 +157,7 @@ fn compile_main_program_self_referential() -> Bytecode {
 fn build_replacements(
     inner_program_log_size: usize,
     inner_public_memory_log_size: usize,
+    _prox_gaps_conjecture: bool,
     bytecode_zero_eval: F,
 ) -> BTreeMap<String, String> {
     let mut replacements = BTreeMap::new();
@@ -345,12 +434,15 @@ fn build_replacements(
         MERKLE_LEVELS_PER_CHUNK_FOR_SLOT.to_string(),
     );
 
-    // Threshold replacements
+    // Threshold-specific replacements (consumed by threshold_aggregate.py imported from main.py)
+    replacements.insert(
+        "MAX_THRESHOLD_GROUPS_PLACEHOLDER".to_string(),
+        MAX_THRESHOLD_GROUPS.to_string(),
+    );
     replacements.insert(
         "MAX_THRESHOLD_DEPTH_PLACEHOLDER".to_string(),
         MAX_HYPERTREE_DEPTH.to_string(),
     );
-    replacements.insert("MAX_THRESHOLD_GROUPS_PLACEHOLDER".to_string(), MAX_THRESHOLD_GROUPS.to_string());
 
     // Bytecode zero eval
     replacements.insert(

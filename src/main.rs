@@ -1,5 +1,5 @@
 use clap::Parser;
-use rec_aggregation::{AggregationTopology, ThresholdGroupSpec, benchmark::run_aggregation_benchmark};
+use rec_aggregation::{AggregationTopology, ThresholdGroupSpec, benchmark::{run_aggregation_benchmark, run_inline_vs_recursive_threshold_benchmark}};
 mod prove_poseidons;
 
 use crate::prove_poseidons::benchmark_prove_poseidon_16;
@@ -37,9 +37,8 @@ enum Cli {
         #[arg(long, help = "Uses Conjecture 4.12 from WHIR (up to capacity)")]
         prox_gaps_conjecture: bool,
     },
-    #[command(about = "Run a fancy threshold aggregation topology")]
+    #[command(about = "Run a parameterised multi-layer threshold aggregation topology")]
     FancyThresholdAggregation {
-        // TODO use the latest results (i.e. update the conjecture)
         #[arg(long, help = "Uses Conjecture 4.12 from WHIR (up to capacity)")]
         prox_gaps_conjecture: bool,
     },
@@ -55,6 +54,17 @@ enum Cli {
         prox_gaps_conjecture: bool,
         #[arg(long, help = "Enable tracing")]
         tracing: bool,
+    },
+    #[command(about = "Inline threshold vs two-proof recursive-child: true end-to-end cost comparison")]
+    InlineVsRecursiveThreshold {
+        #[arg(long, help = "Threshold (minimum signers)", default_value = "3")]
+        k: usize,
+        #[arg(long, help = "Total signers in group", default_value = "4")]
+        n: usize,
+        #[arg(long, help = "log(1/rate) in WHIR", default_value = "1", short = 'r')]
+        log_inv_rate: usize,
+        #[arg(long, help = "Uses Conjecture 4.12 from WHIR (up to capacity)")]
+        prox_gaps_conjecture: bool,
     },
 }
 
@@ -103,7 +113,7 @@ fn main() {
         } => {
             benchmark_prove_poseidon_16(log_count, tracing);
         }
-        Cli::FancyAggregation { prox_gaps_conjecture } => {
+        Cli::FancyAggregation { prox_gaps_conjecture, .. } => {
             let topology = AggregationTopology {
                 raw_xmss: 10,
                 threshold_groups: vec![],
@@ -151,8 +161,7 @@ fn main() {
             };
             run_aggregation_benchmark(&topology, 5, prox_gaps_conjecture, false);
         }
-
-        Cli::FancyThresholdAggregation { prox_gaps_conjecture } => {
+        Cli::FancyThresholdAggregation { prox_gaps_conjecture, .. } => {
             let topology = AggregationTopology {
                 raw_xmss: 10,
                 threshold_groups: vec![],
@@ -211,10 +220,10 @@ fn main() {
                                     log_inv_rate: 2,
                                 },
                                 AggregationTopology {
-                                    raw_xmss: 1300,
+                                    raw_xmss: 1350,
                                     threshold_groups: vec![
-                                        ThresholdGroupSpec {k: 4, n: 7};
-                                        100
+                                        ThresholdGroupSpec {k: 3, n: 4};
+                                        50
                                     ],
                                     children: vec![],
                                     log_inv_rate: 2,
@@ -244,6 +253,14 @@ fn main() {
                 log_inv_rate,
             };
             run_aggregation_benchmark(&topology, 0, prox_gaps_conjecture, tracing);
+        }
+        Cli::InlineVsRecursiveThreshold {
+            k,
+            n,
+            log_inv_rate,
+            prox_gaps_conjecture,
+        } => {
+            run_inline_vs_recursive_threshold_benchmark(k, n, log_inv_rate, prox_gaps_conjecture);
         }
     }
 }

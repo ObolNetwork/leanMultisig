@@ -12,7 +12,7 @@ use xmss::{XmssPublicKey, XmssSignature, xmss_key_gen, xmss_sign};
 
 use utils::ansi as s;
 
-use crate::compilation::{get_aggregation_bytecode, init_aggregation_bytecode};
+use crate::compilation::{get_aggregation_bytecode, get_aggregation_bytecode_for, init_aggregation_bytecode};
 use crate::{AggregatedXMSS, AggregationTopology, ThresholdGroupSpec, count_signers, xmss_aggregate, xmss_verify_aggregation};
 
 fn count_nodes(topology: &AggregationTopology) -> usize {
@@ -257,7 +257,7 @@ fn generate_threshold_test_data(
     (group, tsig)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::only_used_in_recursion)]
 fn build_aggregation(
     topology: &AggregationTopology,
     display_index: usize,
@@ -366,7 +366,7 @@ pub fn run_aggregation_benchmark(topology: &AggregationTopology, overlap: usize,
     init_aggregation_bytecode();
     println!(
         "Aggregation program: {} instructions\n",
-        pretty_integer(get_aggregation_bytecode().instructions.len())
+        pretty_integer(get_aggregation_bytecode_for(prox_gaps_conjecture).instructions.len())
     );
 
     // Build display
@@ -432,3 +432,125 @@ fn test_aggregation_throughput_per_num_xmss() {
         println!("\nWrote {}", path.display());
     }
 }
+
+/// Compare the true end-to-end cost of the two ways to handle a threshold group in the
+/// aggregation tree.
+///
+/// **[A] Inline** — one `aggregate()` call where the threshold group is embedded directly
+/// inside `main.py`. Threshold XMSS verification and hypertree Merkle proof run inside this
+/// single circuit. Result: one `AggregatedSigs` proof, directly usable by parent nodes.
+///
+/// **[B] Recursive child** — two proofs:
+///   - `[B-leaf]`: same `aggregate([], [(group, tsig)])` as [A] — threshold must be proven
+///     somewhere regardless. Cost is identical to [A].
+///   - `[B-parent]`: `aggregate(children=[B-leaf], [], [])` — a parent node that recursively
+///     verifies `[B-leaf]` inside `main.py` and produces a fresh proof.
+///   - Total cost = `t(B-leaf) + t(B-parent)` ≈ `t(A) + t(B-parent)`.
+///
+/// The overhead of the recursive approach is `t(B-parent)`: an extra aggregation proof whose
+/// entire work is recursive verification of one child. This is the irreducible cost added on
+/// top of the inline approach.
+pub fn run_inline_vs_recursive_threshold_benchmark(
+    k: usize,
+    n: usize,
+    log_inv_rate: usize,
+    prox_gaps_conjecture: bool,
+) {
+    precompute_dft_twiddles::<F>(1 << 24);
+    init_aggregation_bytecode();
+
+    let message = message_for_benchmark();
+    let slot = BENCHMARK_SLOT;
+    let (group, tsig) = generate_threshold_test_data(&ThresholdGroupSpec { k, n }, &message, slot, 0);
+
+    // The aggregation circuit requires every recursive child to have ≥ 2 pub keys, because it
+    // initialises the running Poseidon hash with poseidon16(pk0, pk1, ...).  A single threshold
+    // group contributes exactly 1 pub key (the hypertree root), so we add 1 raw XMSS signer to
+    // both [A] and [B-leaf].  Both use the same leaf circuit — the overhead measured by
+    // [B-parent] is still the pure recursive-verification cost.
+    let cache = read_benchmark_signers_cache();
+    let raw_xmss = vec![reconstruct_signer_for_benchmark(0, cache[0])];
+
+    let agg_bytecode = get_aggregation_bytecode_for(prox_gaps_conjecture);
+    println!("=== Inline vs recursive threshold: {k}-of-{n} ===\n");
+    println!(
+        "Aggregation program: {} instructions",
+        pretty_integer(agg_bytecode.instructions.len())
+    );
+    println!("(Leaf carries 1 raw XMSS + 1 threshold group = 2 pub keys.)\n");
+
+    // ── [A] Inline ──────────────────────────────────────────────────────────────────────────────
+    // One proof: threshold verification happens inside the single aggregation circuit.
+    let t0 = Instant::now();
+    let leaf_agg = crate::aggregate(
+        &[],
+        raw_xmss.clone(),
+        &[(group, tsig)],
+        &message,
+        slot,
+        log_inv_rate,
+    );
+    let t_leaf = t0.elapsed().as_secs_f64();
+    crate::verify_aggregation(&leaf_agg, &message, slot).expect("[A] inline verify failed");
+
+    // Copy metadata out before lending leaf_agg to the parent call.
+    let (cycles_a, mem_a, pos_a, dots_a, proof_kib_a) = {
+        let m = leaf_agg.metadata.as_ref().unwrap();
+        let kib = leaf_agg.proof.proof_size_fe() * lean_vm::F::bits() / (8 * 1024);
+        (m.cycles, m.memory, m.n_poseidons, m.n_dot_products, kib)
+    };
+
+    println!("[A] Inline — single proof, threshold inside aggregation circuit");
+    println!("    Time      : {t_leaf:.3}s");
+    println!("    Proof size: {proof_kib_a} KiB");
+    println!("    Cycles    : {}", pretty_integer(cycles_a));
+    println!("    Memory    : {}", pretty_integer(mem_a));
+    println!("    Poseidons : {}", pretty_integer(pos_a));
+    println!("    Dots      : {}", pretty_integer(dots_a));
+
+    // ── [B] Recursive child ──────────────────────────────────────────────────────────────────────
+    // [B-leaf] = leaf_agg from [A] — cost t_leaf is already paid.
+    // [B-parent]: a new aggregation proof with leaf_agg as its sole recursive child.
+    let t1 = Instant::now();
+    let parent_agg = crate::aggregate(
+        &[leaf_agg],
+        vec![],
+        &[],
+        &message,
+        slot,
+        log_inv_rate,
+    );
+    let t_parent = t1.elapsed().as_secs_f64();
+    crate::verify_aggregation(&parent_agg, &message, slot).expect("[B] parent verify failed");
+
+    let (cycles_p, mem_p, pos_p, dots_p, proof_kib_p) = {
+        let m = parent_agg.metadata.as_ref().unwrap();
+        let kib = parent_agg.proof.proof_size_fe() * lean_vm::F::bits() / (8 * 1024);
+        (m.cycles, m.memory, m.n_poseidons, m.n_dot_products, kib)
+    };
+
+    let t_recursive_total = t_leaf + t_parent;
+
+    println!("\n[B] Recursive child — two-proof pipeline");
+    println!("    [B-leaf]   : {t_leaf:.3}s  (identical computation to [A])");
+    println!("    [B-parent] : {t_parent:.3}s  ({} cycles, {proof_kib_p} KiB)",
+        pretty_integer(cycles_p));
+    println!("    Memory     : {}", pretty_integer(mem_p));
+    println!("    Poseidons  : {}", pretty_integer(pos_p));
+    println!("    Dots       : {}", pretty_integer(dots_p));
+    println!("    Total [B]  : {t_recursive_total:.3}s");
+
+    // ── Summary ──────────────────────────────────────────────────────────────────────────────────
+    println!("\n[Summary]");
+    println!(
+        "    Total time [B] / [A]      : {:.2}x  ({t_recursive_total:.3}s vs {t_leaf:.3}s)",
+        t_recursive_total / t_leaf
+    );
+    println!(
+        "    Extra cost (B-parent)     : +{t_parent:.3}s  ({:.0}% on top of [A])",
+        t_parent / t_leaf * 100.0
+    );
+    println!();
+    println!("[B-parent] has 0 direct signers — its entire work is recursive verification of [B-leaf] inside main.py.");
+}
+

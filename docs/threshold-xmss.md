@@ -221,7 +221,31 @@ cargo run --release -- threshold --k 2 --n 4 -r 2 --tracing
 cargo run --release -- threshold --k 5 --n 7 --prox-gaps-conjecture
 ```
 
-Threshold groups can also be embedded in the `FancyAggregation` topology or any custom `AggregationTopology` programmatically.
+### Multi-layer parameterised benchmark
+
+`fancy-threshold-aggregation` builds a balanced tree (`--fanout` children per node, `--layers` deep) where every leaf carries raw XMSS signatures and threshold groups:
+
+```bash
+# Defaults: 2 layers, fanout 3, 700 raw + 1×3-of-4 per leaf → 9 leaves, 6,309 total signers
+cargo run --release -- fancy-threshold-aggregation
+
+# 1 layer, 2 children, 100 raw XMSS + 2 threshold groups per leaf
+cargo run --release -- fancy-threshold-aggregation \
+    --layers 1 --fanout 2 --raw-per-leaf 100 --threshold-groups-per-leaf 2
+
+# Pure threshold tree: 3 layers of 2-of-3 groups, no raw XMSS
+cargo run --release -- fancy-threshold-aggregation \
+    --layers 2 --fanout 2 --raw-per-leaf 0 --threshold-groups-per-leaf 3 --k 2 --n 3
+
+# Large deployment with proximity-gaps optimisation
+cargo run --release -- fancy-threshold-aggregation \
+    --layers 3 --fanout 4 --raw-per-leaf 1400 --threshold-groups-per-leaf 5 \
+    --k 4 --n 7 --prox-gaps-conjecture
+```
+
+The topology displayed by the benchmark uses the same live tree renderer as `fancy-aggregation`, with `T` suffixes indicating threshold groups at each node.
+
+Threshold groups can also be embedded in any custom `AggregationTopology` programmatically.
 
 ## Testing
 
