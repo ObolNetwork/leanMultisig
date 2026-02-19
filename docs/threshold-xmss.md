@@ -2,7 +2,7 @@
 
 ## Overview
 
-Threshold XMSS adds k-of-n multisignature support to the zkVM aggregation system. A **threshold group** is a small set of up to 8 XMSS signers (e.g., 3-of-5 or 5-of-7) whose joint identity is represented by the root of a binary Merkle tree (the "hypertree") over their individual XMSS public keys. A ZK proof attests that at least k of the n members signed the message, without revealing which specific members participated (beyond what the prover chooses to disclose).
+Threshold XMSS adds k-of-n multisignature support to the zkVM aggregation system. A **threshold group** is a small set of up to 8 XMSS signers (e.g., 3-of-5 or 5-of-7) whose joint identity is represented by the root of a binary Merkle tree (the "hypertree") over their individual XMSS public keys.
 
 This feature targets Distributed Validator (DV) clusters for Post-Quantum Ethereum, where a small group of operators must collectively authorize an action.
 
@@ -13,7 +13,7 @@ This feature targets Distributed Validator (DV) clusters for Post-Quantum Ethere
 The central design decision is to embed threshold verification **inside the existing aggregation circuit** as a new source type, alongside raw XMSS signatures and recursive child proofs. This means:
 
 - **One bytecode program** — The DSL circuit (`main.py`) remains a single compilation unit. Threshold groups are processed in a loop between the raw XMSS loop and the recursion loop.
-- **Homogeneous recursion** — A parent aggregation node sees the output of a threshold-bearing proof as a standard `AggregatedSigs`. It does not need to know whether that child used thresholds, raw XMSS, or both. The bytecode claim reduction, public input format, and WHIR/Logup/AIR stack are completely untouched.
+- **Homogeneous recursion** — A parent aggregation node sees the output of a threshold-bearing proof as a standard `AggregatedSigs`. It does not need to know whether that child used thresholds, raw XMSS, or both. The bytecode claim reduction, public input format, and WHIR/Logup/AIR stack are untouched.
 - **No new proof types** — There is no separate "threshold proof" artifact. The threshold verification is simply additional constraint logic inside the same proving pipeline.
 
 The alternative would have been a separate threshold circuit producing its own proof, then fed as a child into recursive aggregation. That approach would double the proof overhead for simple threshold groups and require managing a second bytecode program and its compilation.
@@ -22,7 +22,7 @@ The alternative would have been a separate threshold circuit producing its own p
 
 The hypertree is a standard binary Merkle tree of depth `ceil(log2(n))`, where:
 - Leaves are the individual XMSS `merkle_root` values (each 8 KoalaBear field elements).
-- Non-leaf nodes are computed with `poseidon16_compress_pair(left, right)`, the same Poseidon2-based compression used throughout the codebase (16-element state, 8-element output).
+- Non-leaf nodes are computed with `poseidon16_compress_pair(left, right)`, the same Poseidon2-based compression used throughout the codebase.
 - If n is not a power of 2, the remaining leaves are padded with zero digests.
 - The hypertree root serves as the threshold group's public key — a single 8-element digest that appears in the global `pub_keys` list.
 
@@ -32,7 +32,7 @@ Depth is capped at 3 (supporting groups of up to 8 members). This small bound al
 
 For each threshold group, the circuit verifies k participants:
 1. **XMSS signature check** — Each signer's XMSS signature is verified against their individual `merkle_root`, using the same `xmss_verify` function used for raw XMSS signatures.
-2. **Hypertree membership proof** — Each signer's `merkle_root` is proven to be a leaf of the hypertree via a Merkle path (1–3 sibling digests, depending on depth). The path is hashed bottom-up and the computed root is asserted equal to the group's expected root.
+2. **Hypertree membership proof** — Each signer's `merkle_root` is proven to be a leaf of the hypertree via a Merkle path (1–3 sibling digests, depending on depth).
 3. **Distinctness enforcement** — A bitmap array (`seen[MAX_THRESHOLD_SIGNERS]`) ensures no signer index is used twice.
 
 The signer `merkle_root` values are provided as hints in the private input. The `xmss_verify` function writes the computed XMSS root to this hint location (the standard "write-to-pointer" assertion pattern in the DSL). Then `hypertree_merkle_verify` computes a fresh root from that same value and the Merkle path, and the circuit explicitly asserts element-wise equality between the computed hypertree root and the expected root from `all_pubkeys`.
@@ -47,56 +47,12 @@ crates/xmss/src/
 
 crates/rec_aggregation/
   threshold_aggregate.py NEW   In-circuit threshold verification (DSL)
-  main.py               MOD   Main circuit: added threshold loop, shifted header
+  main.py                MOD   Main circuit: added threshold loop, shifted header
   src/lib.rs             MOD   Rust aggregate(): threshold source blocks, Poseidon traces
   src/compilation.rs     MOD   Placeholder constants for threshold params
   src/benchmark.rs       MOD   Test data generation, display support
 
 src/main.rs              MOD   CLI: added `threshold` subcommand
-```
-
-### Data flow
-
-```
-┌─────────────────────────────────┐
-│  Setup (native Rust)            │
-│  ┌─────────────────────────┐    │
-│  │ n XMSS keypairs         │    │
-│  │ ThresholdGroup::new()   │────│──▸ hypertree root = group public key
-│  │ k signers produce XMSS  │    │
-│  │ signatures               │    │
-│  └─────────────────────────┘    │
-└───────────────┬─────────────────┘
-                │
-                ▼
-┌─────────────────────────────────┐
-│  aggregate() in lib.rs          │
-│  ┌─────────────────────────┐    │
-│  │ Build global pub_keys   │    │   hypertree root added to sorted set
-│  │ Build threshold source  │    │   [k, depth, global_idx, leaf_indices,
-│  │   block (private input) │    │    signer_roots, xmss_sigs, proofs]
-│  │ Precompute Poseidons    │────│──▸ threshold_verify_with_poseidon_trace()
-│  │ prove_execution()       │    │
-│  └─────────────────────────┘    │
-└───────────────┬─────────────────┘
-                │
-                ▼
-┌─────────────────────────────────┐
-│  Circuit execution (zkVM)       │
-│  ┌─────────────────────────┐    │
-│  │ main.py threshold loop  │    │
-│  │  → threshold_verify_    │    │   For each of k signers:
-│  │     group()             │    │     xmss_verify + hypertree_merkle_verify
-│  │  → partition buffer     │    │     + distinctness bitmap check
-│  └─────────────────────────┘    │
-└───────────────┬─────────────────┘
-                │
-                ▼
-┌─────────────────────────────────┐
-│  Output: AggregatedSigs         │
-│  pub_keys: [..., hypertree_root]│   Looks identical to any other aggregation
-│  proof: [...]                   │   Parent recursion treats it the same way
-└─────────────────────────────────┘
 ```
 
 ### Private input layout
@@ -145,6 +101,8 @@ AggregationTopology {
 - **Bytecode size increased** — The `threshold_aggregate.py` import adds new instructions to the compiled bytecode. The self-referential compilation loop handles this automatically (it re-converges on the correct `log_size`), but the bytecode is now larger, which means slightly more work for every proof — even those not using thresholds. In practice, the added instructions are small relative to the recursion verification logic.
 - **Private input header shifted** — The `n_threshold` field was inserted at position `[1]`, pushing `n_dup` from `[1]` to `[2]` and `all_pubkeys` from `[2]` to `[3]`. This is a breaking change to the private input format. Any external tooling that constructs private inputs directly (rather than going through `aggregate()`) must be updated.
 - **New compilation placeholders** — `MAX_THRESHOLD_DEPTH_PLACEHOLDER` and `MAX_THRESHOLD_GROUPS_PLACEHOLDER` are injected at compile time. These are consumed by `threshold_aggregate.py` and do not interact with any existing placeholder.
+
+The alternative would have been a separate threshold circuit producing its own proof, then fed as a child into recursive aggregation. That approach would double the proof overhead for simple threshold groups and require managing a second bytecode program and its compilation. The `inline-vs-recursive-threshold` benchmark quantitatively demonstrates this, showing that using a recursive child proof for a threshold group introduces significant overhead (the `t_parent` cost) compared to embedding the verification directly. This confirms that the single-bytecode embedding strategy is substantially more efficient for this particular use case.
 
 ### Poseidon precomputation
 
@@ -205,72 +163,20 @@ This is because `expected_root` points into the `all_pubkeys` region of private 
 |----------|-------|-------------|
 | `MAX_HYPERTREE_DEPTH` | 3 | Maximum depth of the binary Merkle tree |
 | `MAX_HYPERTREE_LEAVES` | 8 | Maximum members per threshold group (2^3) |
-| `MAX_THRESHOLD_GROUPS` | 8 | Maximum threshold groups per aggregation node |
+| `MAX_THRESHOLD_GROUPS` | 100 | Maximum threshold groups per aggregation node |
 | `MAX_THRESHOLD_SIGNERS` | 8 | Maximum k (signers) per group (= MAX_HYPERTREE_LEAVES) |
 
-## CLI Usage
-
-```bash
-# Single threshold group: 3-of-5
-cargo run --release -- threshold --k 3 --n 5
-
-# With custom WHIR rate and tracing
-cargo run --release -- threshold --k 2 --n 4 -r 2 --tracing
-
-# With proximity gaps conjecture for potentially smaller proofs
-cargo run --release -- threshold --k 5 --n 7 --prox-gaps-conjecture
-```
-
-### Multi-layer parameterised benchmark
-
-`fancy-threshold-aggregation` builds a balanced tree (`--fanout` children per node, `--layers` deep) where every leaf carries raw XMSS signatures and threshold groups:
-
-```bash
-# Defaults: 2 layers, fanout 3, 700 raw + 1×3-of-4 per leaf → 9 leaves, 6,309 total signers
-cargo run --release -- fancy-threshold-aggregation
-
-# 1 layer, 2 children, 100 raw XMSS + 2 threshold groups per leaf
-cargo run --release -- fancy-threshold-aggregation \
-    --layers 1 --fanout 2 --raw-per-leaf 100 --threshold-groups-per-leaf 2
-
-# Pure threshold tree: 3 layers of 2-of-3 groups, no raw XMSS
-cargo run --release -- fancy-threshold-aggregation \
-    --layers 2 --fanout 2 --raw-per-leaf 0 --threshold-groups-per-leaf 3 --k 2 --n 3
-
-# Large deployment with proximity-gaps optimisation
-cargo run --release -- fancy-threshold-aggregation \
-    --layers 3 --fanout 4 --raw-per-leaf 1400 --threshold-groups-per-leaf 5 \
-    --k 4 --n 7 --prox-gaps-conjecture
-```
-
-The topology displayed by the benchmark uses the same live tree renderer as `fancy-aggregation`, with `T` suffixes indicating threshold groups at each node.
-
-Threshold groups can also be embedded in any custom `AggregationTopology` programmatically.
-
 ## Testing
-
-### Unit tests (`cargo test --release -p xmss`)
-
-7 hypertree-specific tests:
-- `test_hypertree_n4_depth2` — 4 members, depth 2, verify all Merkle proofs.
-- `test_hypertree_n7_depth3_padded` — 7 members, padded to 8, depth 3, verify proofs for original leaves.
-- `test_hypertree_n2_depth1` — 2 members, depth 1, minimal case.
-- `test_invalid_merkle_proof` — Wrong leaf digest is rejected.
-- `test_threshold_verify_native` — 3-of-4 threshold verify succeeds natively.
-- `test_threshold_verify_below_threshold` — 2-of-4 when threshold is 3 is rejected.
-- `test_threshold_verify_duplicate_signer` — Same signer index twice is rejected.
 
 ### Integration tests (`cargo test --release --all`)
 
 The existing `test_recursive_aggregation` in `src/lib.rs` passes with `threshold_sigs: &[]`, confirming backward compatibility.
 
-### End-to-end benchmark
+### CLI benchmark
 
-```bash
-cargo run --release -- threshold --k 3 --n 5
-```
-
-This generates 5 XMSS keypairs, builds a hypertree, signs with 3 of them, compiles the bytecode, proves, and verifies.
+The `fancy-threshold-aggregation` command runs an end-to-end benchmark for complex, multi-layer aggregation topologies that include threshold groups.
+`cargo run --release -- fancy-threshold-aggregation` tests the integration of threshold groups within a hierarchical aggregation structure, simulating more realistic deployment scenarios.
+It simply consists of adapting `fancy-aggregation` to support threshold signatures.
 
 ## Future Potential Improvements
 
@@ -295,14 +201,6 @@ This would require minimal structural changes but adds arithmetic to the circuit
 ### Threshold-of-thresholds
 
 Since each threshold group produces a standard `AggregatedSigs` with a single hypertree root as its public key, a parent aggregation could include multiple threshold groups as raw public keys, and a higher-level threshold group could be built over those roots. This creates a recursive threshold structure without any new code — it is already supported by the topology system.
-
-### Privacy improvements
-
-Currently, the proof reveals the hypertree root (the group's public key) but not which members signed. However, the signer indices and XMSS signatures are in the private input, so they are not revealed by the proof. A future enhancement could additionally hide the group composition by committing to the hypertree off-chain and only revealing the root.
-
-### Dynamic unrolling for the inner loop
-
-The `for i in range(0, k):` loop over signers currently uses the default loop compilation strategy. For groups where k varies significantly (e.g., 2 vs. 8), a `dynamic_unroll` could reduce cycle count by avoiding unnecessary loop iterations. This is a minor optimization.
 
 ### Parallel threshold group proving
 
