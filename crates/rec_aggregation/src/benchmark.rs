@@ -339,7 +339,11 @@ fn build_aggregation(
                 memory: result.metadata.as_ref().unwrap().memory,
                 poseidons: result.metadata.as_ref().unwrap().n_poseidons,
                 dots: result.metadata.as_ref().unwrap().n_extension_ops,
-                n_xmss: if is_leaf { Some(topology.raw_xmss) } else { None },
+                n_xmss: if is_leaf {
+                    Some(topology.raw_xmss + threshold_sigs.len())
+                } else {
+                    None
+                },
             },
         );
     }
