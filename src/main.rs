@@ -187,16 +187,16 @@ fn main() {
                                         log_inv_rate: 1,
                                     },
                                     AggregationTopology {
-                                        raw_xmss: 1390,
+                                        raw_xmss: 1350,
                                         threshold_groups: vec![
-                                            ThresholdGroupSpec {k: 3, n: 4};
+                                            ThresholdGroupSpec {k: 5, n: 7};
                                             10
                                         ],
                                         children: vec![],
                                         log_inv_rate: 1,
                                     },
                                     AggregationTopology {
-                                        raw_xmss: 1300,
+                                        raw_xmss: 1100,
                                         threshold_groups: vec![
                                             ThresholdGroupSpec {k: 3, n: 4};
                                             100
@@ -220,7 +220,7 @@ fn main() {
                                     log_inv_rate: 2,
                                 },
                                 AggregationTopology {
-                                    raw_xmss: 1350,
+                                    raw_xmss: 1250,
                                     threshold_groups: vec![
                                         ThresholdGroupSpec {k: 3, n: 4};
                                         50
