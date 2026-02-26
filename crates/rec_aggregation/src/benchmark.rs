@@ -12,7 +12,7 @@ use xmss::{XmssPublicKey, XmssSignature, xmss_key_gen, xmss_sign};
 
 use utils::ansi as s;
 
-use crate::compilation::{get_aggregation_bytecode, get_aggregation_bytecode_for, init_aggregation_bytecode};
+use crate::compilation::{get_aggregation_bytecode_for, init_aggregation_bytecode};
 use crate::{AggregatedXMSS, AggregationTopology, ThresholdGroupSpec, count_signers, xmss_aggregate, xmss_verify_aggregation};
 
 fn count_nodes(topology: &AggregationTopology) -> usize {
@@ -236,7 +236,7 @@ fn generate_threshold_test_data(
     let mut roots = Vec::new();
     let mut secret_keys = Vec::new();
     for _ in 0..spec.n {
-        let seed: [u8; 32] = rand::Rng::random(&mut rng);
+        let seed: [u8; 20] = rand::Rng::random(&mut rng);
         let (sk, pk) = xmss_key_gen(seed, slot.saturating_sub(2), slot + 2).unwrap();
         roots.push(pk.merkle_root);
         secret_keys.push(sk);
@@ -257,7 +257,7 @@ fn generate_threshold_test_data(
     (group, tsig)
 }
 
-#[allow(clippy::too_many_arguments, clippy::only_used_in_recursion)]
+#[allow(clippy::too_many_arguments)]
 fn build_aggregation(
     topology: &AggregationTopology,
     display_index: usize,
@@ -265,7 +265,6 @@ fn build_aggregation(
     pub_keys: &[XmssPublicKey],
     signatures: &[XmssSignature],
     overlap: usize,
-    prox_gaps_conjecture: bool,
     tracing: bool,
 ) -> (AggregatedXMSS, f64) {
     let message = message_for_benchmark();
@@ -287,7 +286,6 @@ fn build_aggregation(
             &pub_keys[child_start..child_start + child_count],
             &signatures[child_start..child_start + child_count],
             overlap,
-            prox_gaps_conjecture,
             tracing,
         );
         child_results.push(child_agg);
@@ -351,7 +349,7 @@ fn build_aggregation(
     (result, elapsed.as_secs_f64())
 }
 
-pub fn run_aggregation_benchmark(topology: &AggregationTopology, overlap: usize, tracing: bool) -> f64 {
+pub fn run_aggregation_benchmark(topology: &AggregationTopology, overlap: usize, prox_gaps_conjecture: bool, tracing: bool) -> f64 {
     if tracing {
         utils::init_tracing();
     }
@@ -398,7 +396,6 @@ fn test_aggregation_throughput_per_num_xmss() {
     let log_inv_rate = 1;
     precompute_dft_twiddles::<F>(1 << 24);
     init_aggregation_bytecode();
-    let _ = get_aggregation_bytecode();
     let mut num_xmss_and_time = vec![];
     let mut indexes = vec![];
     for i in 1..100 {
@@ -413,10 +410,11 @@ fn test_aggregation_throughput_per_num_xmss() {
     for num_xmss in indexes {
         let topology = AggregationTopology {
             raw_xmss: num_xmss,
+            threshold_groups: vec![],
             children: vec![],
             log_inv_rate,
         };
-        let time = run_aggregation_benchmark(&topology, 0, false);
+        let time = run_aggregation_benchmark(&topology, 0, false, false);
         num_xmss_and_time.push((num_xmss, time));
         println!(
             "{} XMSS -> {} XMSS/s",
@@ -442,7 +440,7 @@ fn test_aggregation_throughput_per_num_xmss() {
 ///
 /// **[A] Inline** — one `aggregate()` call where the threshold group is embedded directly
 /// inside `main.py`. Threshold XMSS verification and hypertree Merkle proof run inside this
-/// single circuit. Result: one `AggregatedSigs` proof, directly usable by parent nodes.
+/// single circuit. Result: one `AggregatedXMSS` proof, directly usable by parent nodes.
 ///
 /// **[B] Recursive child** — two proofs:
 ///   - `[B-leaf]`: same `aggregate([], [(group, tsig)])` as [A] — threshold must be proven
@@ -486,7 +484,7 @@ pub fn run_inline_vs_recursive_threshold_benchmark(
     // ── [A] Inline ──────────────────────────────────────────────────────────────────────────────
     // One proof: threshold verification happens inside the single aggregation circuit.
     let t0 = Instant::now();
-    let leaf_agg = crate::aggregate(
+    let leaf_agg = xmss_aggregate(
         &[],
         raw_xmss.clone(),
         &[(group, tsig)],
@@ -495,13 +493,13 @@ pub fn run_inline_vs_recursive_threshold_benchmark(
         log_inv_rate,
     );
     let t_leaf = t0.elapsed().as_secs_f64();
-    crate::verify_aggregation(&leaf_agg, &message, slot).expect("[A] inline verify failed");
+    xmss_verify_aggregation(&leaf_agg, &message, slot).expect("[A] inline verify failed");
 
     // Copy metadata out before lending leaf_agg to the parent call.
     let (cycles_a, mem_a, pos_a, dots_a, proof_kib_a) = {
         let m = leaf_agg.metadata.as_ref().unwrap();
         let kib = leaf_agg.proof.proof_size_fe() * lean_vm::F::bits() / (8 * 1024);
-        (m.cycles, m.memory, m.n_poseidons, m.n_dot_products, kib)
+        (m.cycles, m.memory, m.n_poseidons, m.n_extension_ops, kib)
     };
 
     println!("[A] Inline — single proof, threshold inside aggregation circuit");
@@ -516,7 +514,7 @@ pub fn run_inline_vs_recursive_threshold_benchmark(
     // [B-leaf] = leaf_agg from [A] — cost t_leaf is already paid.
     // [B-parent]: a new aggregation proof with leaf_agg as its sole recursive child.
     let t1 = Instant::now();
-    let parent_agg = crate::aggregate(
+    let parent_agg = xmss_aggregate(
         &[leaf_agg],
         vec![],
         &[],
@@ -525,12 +523,12 @@ pub fn run_inline_vs_recursive_threshold_benchmark(
         log_inv_rate,
     );
     let t_parent = t1.elapsed().as_secs_f64();
-    crate::verify_aggregation(&parent_agg, &message, slot).expect("[B] parent verify failed");
+    xmss_verify_aggregation(&parent_agg, &message, slot).expect("[B] parent verify failed");
 
     let (cycles_p, mem_p, pos_p, dots_p, proof_kib_p) = {
         let m = parent_agg.metadata.as_ref().unwrap();
         let kib = parent_agg.proof.proof_size_fe() * lean_vm::F::bits() / (8 * 1024);
-        (m.cycles, m.memory, m.n_poseidons, m.n_dot_products, kib)
+        (m.cycles, m.memory, m.n_poseidons, m.n_extension_ops, kib)
     };
 
     let t_recursive_total = t_leaf + t_parent;

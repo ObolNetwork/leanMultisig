@@ -326,7 +326,7 @@ pub fn xmss_aggregate(
 
     // Threshold source blocks (between raw XMSS and recursive)
     for (group, tsig) in threshold_sigs {
-        let root = Digest(group.root());
+        let root = XmssPublicKey { merkle_root: group.root() };
         let pos = global_pub_keys.binary_search(&root).unwrap();
         claimed.insert(root);
 
