@@ -60,52 +60,6 @@ def threshold_verify_group(all_pubkeys, threshold_data, message, slot_lo, slot_h
     return global_pubkey_idx
 
 
-def threshold_verify_group_with_root(expected_root, threshold_data, message, slot_lo, slot_hi, merkle_chunks):
-    # Like threshold_verify_group but accepts expected_root directly instead of
-    # computing it from (all_pubkeys, global_pubkey_idx).  expected_root must be a
-    # Memory(Var(...)) in the simplifier — the caller is responsible for loading it
-    # via a memory dereference (e.g. threshold_data[3]) rather than passing a
-    # compile-time constant address.
-    #
-    # Private input layout consumed here:
-    # [k(0) | depth(1) | global_pubkey_idx(2) | pub_input_root_ptr(3) |
-    #  leaf_indices(k starting at 4) | signer_roots(k*DIGEST_LEN) |
-    #  xmss_sigs(k*SIG_SIZE) | hypertree_proofs(k*depth*DIGEST_LEN)]
-    k = threshold_data[0]
-    depth = threshold_data[1]
-
-    assert 0 < k
-    assert k <= MAX_THRESHOLD_SIGNERS
-    assert 0 < depth
-    assert depth <= MAX_THRESHOLD_DEPTH
-
-    indices_ptr = threshold_data + 4
-    roots_ptr = indices_ptr + k
-    sigs_ptr = roots_ptr + k * DIGEST_LEN
-    proofs_ptr = sigs_ptr + k * SIG_SIZE
-
-    seen = Array(MAX_THRESHOLD_SIGNERS)
-
-    for i in range(0, k):
-        leaf_idx = indices_ptr[i]
-
-        assert leaf_idx < powers_of_two(depth)
-        seen[leaf_idx] = i + 1
-
-        signer_root = roots_ptr + i * DIGEST_LEN
-        sig = sigs_ptr + i * SIG_SIZE
-        xmss_verify(signer_root, message, sig, slot_lo, slot_hi, merkle_chunks)
-
-        proof = proofs_ptr + i * depth * DIGEST_LEN
-        computed_root = Array(DIGEST_LEN)
-        hypertree_merkle_verify(signer_root, proof, leaf_idx, depth, computed_root)
-
-        for j in unroll(0, DIGEST_LEN):
-            assert computed_root[j] == expected_root[j]
-
-    return
-
-
 @inline
 def hypertree_merkle_verify(leaf_digest, proof_path, leaf_idx, depth, out_root):
     match depth:

@@ -457,27 +457,6 @@ pub fn extract_bytecode_claim_from_public_input(public_input: &[F], bytecode_poi
     Evaluation::new(point, value)
 }
 
-/// A standalone proof that a threshold group's k-of-n policy was satisfied for a given message.
-/// Produced by [`prove_threshold`] from [`compilation::get_threshold_bytecode`].
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ThresholdAggregatedSig {
-    /// The hypertree root that was proven (= the group's public key).
-    pub threshold_root: Digest,
-    /// The minimum number of signers required (k), committed to the public input.
-    pub minimum_k: usize,
-    /// The ZK proof.
-    pub proof: PrunedProof<F>,
-    // benchmark / debug purpose
-    #[serde(skip, default)]
-    pub metadata: Option<ExecutionMetadata>,
-}
-
-impl ThresholdAggregatedSig {
-    pub fn proof_size_kib(&self) -> usize {
-        self.proof.proof_size_fe() * F::bits() / (8 * 1024)
-    }
-}
-
 pub fn hash_bytecode_claims(claims: &[Evaluation<EF>]) -> [F; DIGEST_LEN] {
     let mut running_hash = [F::ZERO; DIGEST_LEN];
     for eval in claims {
