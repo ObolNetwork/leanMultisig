@@ -348,9 +348,8 @@ pub fn xmss_aggregate(
             block.extend(encode_xmss_signature(sig));
         }
         // Hypertree Merkle proofs
-        for &leaf_idx in &tsig.signer_indices {
-            let proof = group.merkle_proof(leaf_idx);
-            for sibling in &proof {
+        for proof in &tsig.merkle_proofs {
+            for sibling in proof {
                 block.extend_from_slice(sibling);
             }
         }

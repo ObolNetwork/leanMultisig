@@ -18,6 +18,9 @@ pub struct ThresholdGroup {
 pub struct ThresholdSignature {
     pub signer_indices: Vec<usize>,
     pub xmss_signatures: Vec<XmssSignature>,
+    /// Hypertree Merkle proof for each signer: `merkle_proofs[i]` contains the
+    /// `depth` sibling digests authenticating `signer_indices[i]` against the group root.
+    pub merkle_proofs: Vec<Vec<Digest>>,
 }
 
 fn next_power_of_two_exp(n: usize) -> usize {
@@ -105,7 +108,9 @@ pub fn threshold_verify(
     tsig: &ThresholdSignature,
     message: &[F; MESSAGE_LEN_FE],
 ) -> Result<(), ThresholdVerifyError> {
-    if tsig.signer_indices.len() != tsig.xmss_signatures.len() {
+    if tsig.signer_indices.len() != tsig.xmss_signatures.len()
+        || tsig.signer_indices.len() != tsig.merkle_proofs.len()
+    {
         return Err(ThresholdVerifyError::SignatureCountMismatch);
     }
     let k = tsig.signer_indices.len();
@@ -134,8 +139,7 @@ pub fn threshold_verify(
             .map_err(|_| ThresholdVerifyError::InvalidXmssSignature)?;
 
         // Verify hypertree Merkle proof
-        let proof = group.merkle_proof(leaf_idx);
-        if !group.verify_merkle_proof(leaf_idx, &signer_root, &proof) {
+        if !group.verify_merkle_proof(leaf_idx, &signer_root, &tsig.merkle_proofs[i]) {
             return Err(ThresholdVerifyError::InvalidHypertreeProof);
         }
     }
@@ -161,10 +165,9 @@ pub fn threshold_verify_with_poseidon_trace(
         poseidon_trace.extend(trace);
 
         // Trace hypertree Merkle path
-        let proof = group.merkle_proof(leaf_idx);
         let mut current = signer_root;
         let mut idx = leaf_idx;
-        for sibling in &proof {
+        for sibling in &tsig.merkle_proofs[i] {
             let is_left = (idx & 1) == 0;
             current = if is_left {
                 poseidon16_compress_with_trace(&current, sibling, &mut poseidon_trace)
@@ -282,10 +285,12 @@ mod tests {
             .iter()
             .map(|&i| xmss_sign(&mut rng, &secret_keys[i], &message, 1100).unwrap())
             .collect();
+        let merkle_proofs: Vec<_> = signer_indices.iter().map(|&i| group.merkle_proof(i)).collect();
 
         let tsig = ThresholdSignature {
             signer_indices,
             xmss_signatures,
+            merkle_proofs,
         };
 
         threshold_verify(&group, &tsig, &message).unwrap();
@@ -302,10 +307,12 @@ mod tests {
             .iter()
             .map(|&i| xmss_sign(&mut rng, &secret_keys[i], &message, 1100).unwrap())
             .collect();
+        let merkle_proofs: Vec<_> = signer_indices.iter().map(|&i| group.merkle_proof(i)).collect();
 
         let tsig = ThresholdSignature {
             signer_indices,
             xmss_signatures,
+            merkle_proofs,
         };
 
         assert_eq!(
@@ -323,9 +330,11 @@ mod tests {
         let sig0 = xmss_sign(&mut rng, &secret_keys[0], &message, 1100).unwrap();
         let sig0b = xmss_sign(&mut rng, &secret_keys[0], &message, 1100).unwrap();
 
+        let merkle_proofs = vec![group.merkle_proof(0), group.merkle_proof(0)];
         let tsig = ThresholdSignature {
             signer_indices: vec![0, 0],
             xmss_signatures: vec![sig0, sig0b],
+            merkle_proofs,
         };
 
         assert_eq!(

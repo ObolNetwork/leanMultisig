@@ -250,9 +250,11 @@ fn generate_threshold_test_data(
         .map(|&i| xmss_sign(&mut rng, &secret_keys[i], message, slot).unwrap())
         .collect();
 
+    let merkle_proofs: Vec<_> = signer_indices.iter().map(|&i| group.merkle_proof(i)).collect();
     let tsig = ThresholdSignature {
         signer_indices,
         xmss_signatures,
+        merkle_proofs,
     };
     (group, tsig)
 }
