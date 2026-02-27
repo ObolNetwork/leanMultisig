@@ -152,7 +152,7 @@
 \newcommand{\KBext}{\mathbb{F}_{p^5}}
 \newcommand{\hash}{\mathcal{H}}
 \newcommand{\WOTS}{\textsf{WOTS}^{+}\xspace}
-\newcommand{\aggsig}{\texttt{AggregatedSig}\xspace}
+\newcommand{\aggsig}{\texttt{AggregatedXMSS}\xspace}
 \newcommand{\bls}{\textsf{BLS12-381}\xspace}
 \newcommand{\XMSS}{\textsf{XMSS}\xspace}
 \newcommand{\hypertree}{\mathcal{T}}
@@ -224,8 +224,7 @@ $\WOTS$ is the leaf-level signing primitive.
 A $\WOTS$ private key $\mathsf{sk}_i = (s_1, \ldots, s_V) \in \KB^{V \cdot 8}$ generates a public key by iterating $\poseidon$ along each chain.  To sign, the hash encoding of the message is decomposed into per-chain lengths $e_1, \ldots, e_V$ with $\sum e_i = T$, and each chain tip is revealed at position $e_i$ from the start.
 
 \paragraph{XMSS signatures.}
-An $\XMSS$ key pair covers a lifetime of $2^{n}$ Ethereum \emph{slots} where $n$ is fixed at key generation time. The public key is a single digest $r_{\text{root}} \in \KB^8$
-representing the root of a Merkle tree of depth $n$ over all $\WOTS$ leaf hashes.
+An $\XMSS$ key pair covers a lifetime of $2^{2^h}$ Ethereum \emph{slots} where $h$ is fixed at key generation time. The public key is a single digest $r_{\text{root}} \in \KB^8$ representing the root of a Merkle tree of depth $h$ over all $\WOTS$ leaf hashes.
 A signature at slot $s$ consists of:
 \begin{itemize}
   \item The $\WOTS$ randomness (7 field elements).
@@ -281,7 +280,7 @@ a Reed--Solomon proximity protocol with:
 \begin{itemize}[noitemsep]
   \item Initial folding factor 7, subsequent factor 5.
   \item 18 grinding bits (proof-of-work).
-  \item Code rate $\rho \in \{1/2, 1/4\}$ selectable per node.
+  \item Code rate $\rho \in \{1/2, 1/4, 1/8, 1/16\}$ selectable per node.
 \end{itemize}
 
 \paragraph{Logup.}
@@ -298,7 +297,7 @@ A single \leanConsensus node aggregates at most one ``level'' of the tree. Each 
   \item \textbf{Recursive children} — previously-proven aggregation nodes whose proofs are verified inside this node's circuit.
 \end{enumerate}
 
-The public state of a node is an \texttt{AggregatedSigs} structure:
+The public state of a node is an \aggsig structure:
 \begin{itemize}[noitemsep]
   \item A list of public keys ($8 \times n$ field elements).
   \item A proof $\pi$ (a few hundred KiB, constant regardless of $n$).
@@ -368,10 +367,14 @@ A threshold group $G = (k, n, \hypertree)$ consists of:
     \item $n$ (group size): the total number of members.
     \item $\hypertree$: a Merkle tree of depth $d = \lceil \log_2 n \rceil$, whose $2^d$ leaves are the $n$ individual public keys $r_1, \ldots, r_n$ padded with zero digests to the nearest power of two.
   \end{itemize}
-The joint public key of $G$ is its hypertree root $r_G \in \KB^8$.
+The joint public key of $G$ is
+\[
+  \mathsf{joint\_key}(G) \;=\; \poseidon_{16}\!\left(r_G,\; [k_{\min}, 0, \ldots, 0]\right) \;\in\; \KB^8,
+\]
+where $r_G = \hypertree.\mathsf{Root}$.  The joint key cryptographically commits to both the membership set (via $r_G$) and the minimum signing threshold $k_{\min}$, so that neither can be forged independently once the key is registered.
 \end{definition}
 
-\begin{figure}[t!]
+\begin{figure}[H]
 \centering
 \begin{tikzpicture}[
     scale=1.05,
@@ -415,13 +418,11 @@ The joint public key of $G$ is its hypertree root $r_G \in \KB^8$.
   \node[below=0.4cm of l8, font=\scriptsize, gray]
     {$n=7$, $d=3$, $2^d = 8$ leaves};
 \end{tikzpicture}
-\caption{Hypertree for a $x$-out-of-7 threshold group ($n=7$, depth $d=3$). Seven $\XMSS$ public keys $r_1,\ldots,r_7$ are placed as leaves; the eighth leaf is zero-padded.  Each internal node is a $\poseidon_{16}$ compression of its two children. The hypertree root $r_G$ is the joint public key appearing in the global \texttt{pub\_keys} list.}
+\caption{Hypertree for a $k$-out-of-7 threshold group ($n=7$, depth $d=3$). Seven $\XMSS$ public keys $r_1,\ldots,r_7$ are placed as leaves; the eighth leaf is zero-padded.  Each internal node is a $\poseidon_{16}$ compression of its two children.  The joint public key registered on-chain is $\poseidon_{16}(r_G, [k_{\min}, 0,\ldots,0])$, binding both the membership tree and the threshold.}
 \label{fig:hypertree}
 \end{figure}
 
-\noindent While Definition~\ref{def:thresh_group} is generic regardless of the $k$ and $n$ parameters, we hereafter assume $n \leq 8$ as distributed validators rarely exceed 8 participants.
-Indeed most configurations use either $(k,n) = (3,4)$ or $(5,7)$. 
-A threshold signature then consists of a set of signer indices, individual signatures and membership proofs as defined hereafter. 
+\noindent A threshold signature then consists of a set of signer indices, individual signatures and membership proofs as defined hereafter. 
 
 \begin{definition}[Threshold Signature]
   Given a group $G = (k, n, \hypertree)$ and a message $m$, a threshold signature is a tuple $\Sigma = (\mathbf{i}, \boldsymbol{\sigma}, \boldsymbol{\pi})$ where:
@@ -450,10 +451,9 @@ A threshold signature then consists of a set of signer indices, individual signa
 \subsection{Overview}
 The most straightforward way to extend \leanVM in order to support dummy threshold signatures is to perform the verification of all $k$ signers in a threshold group \emph{inside the same aggregation circuit} as the raw \XMSS and recursive proof checks.
 It implies supporting threshold signatures as a new source type in \texttt{main.py}, processed between raw \XMSS and recursive sources.
-%\begin{observation}[Constant overhead of dummmy threshold signatures]
 Unlike proof-based threshold signatures, the dummy threshold verification logic (\XMSS verification of each signer plus $d \leq 3$ additional \poseidon hashes per signer for the hypertree path) is added as extra rows in the execution trace, not as an additional proof system invocation.  The proving cost of extra trace rows is sublinear (only log factors enter through \WHIR), so a threshold group with $k = 7$ signers adds roughly the same overhead as $7$ extra raw \XMSS signatures.
-%\end{observation}
-\noindent Beyond the raw cost argument, it has the advantage to keep a single bytecode program and an homogeneous recursion interface as no new proof type is introduced.
+Beyond the raw cost argument, it has the advantage to keep a single bytecode program and an homogeneous recursion interface as no new proof type is introduced.
+While Definition~\ref{def:thresh_group} is generic regardless of the $n$ and $d$ parameter, our \leanVM implementation hard-asserts $n \leq 8$ (equivalently $d \leq 3$), as distributed validators rarely exceed 8 participants. Indeed most configurations use either $(k,n) = (3,4)$ or $(5,7)$. 
 
 \subsection{In-Circuit Threshold Verification}
 
@@ -463,16 +463,17 @@ The in-circuit implementation lives in \texttt{threshold\_aggregate.py} and is c
 
 Each threshold source block in private memory has the layout:
 \[
-  \underbrace{k}_{\text{threshold}}\;\;
+  \underbrace{k}_{\text{signers}}\;\;
+  \underbrace{k_{\min}}_{\text{threshold}}\;\;
   \underbrace{d}_{\text{depth}}\;\;
   \underbrace{j}_{\text{pubkey idx}}\;\;
+  \underbrace{r_G}_{\text{root hint}}\;\;
   \underbrace{\ell_1, \ldots, \ell_k}_{\text{leaf indices}}\;\;
   \underbrace{r_{\ell_1}, \ldots, r_{\ell_k}}_{\text{signer roots (hints)}}\;\;
   \underbrace{\sigma_1, \ldots, \sigma_k}_{\text{XMSS sigs}}\;\;
   \underbrace{\pi_1, \ldots, \pi_k}_{\text{hypertree proofs}}
 \]
-where each signer root $r_{\ell_i} \in \KB^8$ is provided as a private hint (not trusted; it is recomputed and verified in-circuit), and each hypertree proof $\pi_i$ consists of $d$ sibling digests.
-
+Here $k$ is the number of signers who actually participated in this instance (may exceed $k_{\min}$), $k_{\min}$ is the registered minimum threshold, $r_G \in \KB^8$ is a private hint of the hypertree root (verified in-circuit against the registered $\mathsf{joint\_key}$), each signer root $r_{\ell_i} \in \KB^8$ is a private hint recomputed and checked during $\XMSS$ verification, and each hypertree proof $\pi_i$ consists of $d$ sibling digests.
 The global private input header was extended from the pre-threshold format:
 \begin{center}
 \resizebox{\textwidth}{!}{
@@ -496,22 +497,30 @@ For each threshold source block (indexed $t = 0, \ldots, n_{\text{threshold}} - 
 \begin{algorithm}[H]
 \caption{\texttt{threshold\_verify\_group} (in-circuit, zkDSL)}
 \label{alg:threshold-verify}
+  \small
 \begin{algorithmic}[1]
-\Require $k$: threshold; $d$: depth; $j$: global pubkey index;
+\Require $k$: actual signer count; $k_{\min}$: minimum threshold; $d$: depth;
+         $j$: global pubkey index; $r_G$: hypertree root;
          $\ell_1,\ldots,\ell_k$: leaf indices;
          $r_{\ell_i}$: signer root hints;
          $\sigma_i$: XMSS signatures;
-         $\pi_i$: hypertree proofs ($d$ siblings each)
-\State $r_G \gets \texttt{all\_pubkeys}[j]$ \quad\Comment{expected hypertree root (public)}
-\State $\texttt{seen} \gets \texttt{Array}(2^d)$ \quad\Comment{write-once bitmap for distinctness}
+         $\pi_i$: hypertree proofs
+\State \textbf{assert} $0 < k_{\min} \leq k \leq \texttt{MAX\_THRESHOLD\_SIGNERS}$
+  \quad\Comment{threshold enforcement}
+\State \textbf{assert} $0 < d$
+\State $\widehat{\mathsf{jk}} \gets \poseidon_{16}(r_G,\;  [k_{\min}, 0, \ldots, 0])$
+\State \textbf{assert} $\widehat{\mathsf{jk}} = \texttt{all\_pubkeys}[j]$ element-wise
+  \quad\Comment{verify $r_G$ and $k_{\min}$ against registered joint key}
+\State $\texttt{seen} \gets \texttt{Array}(\texttt{MAX\_THRESHOLD\_SIGNERS})$
+  \quad\Comment{write-once bitmap for distinctness}
 \For{$i = 0 \to k-1$}
-  \State Assert $\ell_i < 2^d$ \quad\Comment{leaf index in bounds}
+  \State \textbf{assert} $\ell_i < 2^d$ \quad\Comment{leaf index in bounds}
   \State $\texttt{seen}[\ell_i] \gets i + 1$
-    \quad\Comment{write-once: duplicate $\ell_i$ triggers MemoryAlreadySet}
+    \quad\Comment{write-once: duplicate $\ell_i$ triggers \texttt{MemoryAlreadySet}}
   \State $\XMSS.\mathsf{InCircuitVerify}(r_{\ell_i},\; m,\; \sigma_i,\; \text{slot})$
     \quad\Comment{writes $r_{\ell_i}$ to its hint address; memory-write assertion}
   \State $\hat{r}_G \gets \texttt{HypertreeMerkleVerify}(r_{\ell_i}, \pi_i, \ell_i, d)$
-  \State Assert $\hat{r}_G = r_G$ element-wise \quad\Comment{explicit equality check}
+  \State \textbf{assert} $\hat{r}_G = r_G$ element-wise \quad\Comment{signer is a member of the group}
 \EndFor
 \State \Return $j$ \quad\Comment{global pubkey index used for partition counter}
 \end{algorithmic}
@@ -549,7 +558,7 @@ def _hypertree_verify_d3(leaf_digest, proof, leaf_idx, out_root):
     temp1 = Array(DIGEST_LEN)
     match bits[2]:   # level 0 (leaves): LSB
         case 0: poseidon16(leaf_digest, proof,             temp0)
-        case 1: poseidon16(proof,        leaf_digest,      temp0)(
+        case 1: poseidon16(proof,        leaf_digest,      temp0)
     match bits[1]:   # level 1
         case 0: poseidon16(temp0, proof + DIGEST_LEN,     temp1)
         case 1: poseidon16(proof + DIGEST_LEN, temp0,     temp1)
@@ -561,8 +570,8 @@ def _hypertree_verify_d3(leaf_digest, proof, leaf_idx, out_root):
 
 \subsubsection{Root Assertion Pattern}
 
-A subtle correctness point: the signer root $r_{\ell_i}$ passed into \texttt{xmss\_verify} is a \emph{hint} in the private input at a known address.  The $\XMSS$ circuit writes the re-derived root to that address via the memory-write assertion.  The hypertree circuit then reads that same address to begin the Merkle path computation.
-
+A subtle correctness point: the signer root $r_{\ell_i}$ passed into \texttt{xmss\_verify} is a \emph{hint} in the private input at a known address.  The $\XMSS$ circuit writes the re-derived root to that address via the memory-write assertion.
+The hypertree circuit then reads that same address to begin the Merkle path computation.
 The hypertree root $\hat{r}_G$ is computed into a \emph{fresh} buffer (not into the \texttt{all\_pubkeys} region), because that region may already have been written.  An explicit element-wise assertion
 \[
   \hat{r}_G[j] = r_G[j], \quad j = 0, \ldots, 7
@@ -572,18 +581,25 @@ is emitted rather than relying on the write-once memory assertion pattern. This 
 \subsection{Poseidon Precomputation}
 \label{subsec:poseidon-precomp}
 
-The \leanProver requires all $\poseidon_{16}$ input--output pairs to be provided before trace generation (the $\poseidon_{16}$ table is populated from hints, not re-evaluated in the execution trace).  For threshold signatures, each signer contributes:
+The \leanProver requires all $\poseidon_{16}$ input--output pairs to be provided before trace generation (the $\poseidon_{16}$ table is populated from hints, not re-evaluated in the execution trace).  For a threshold group, the complete trace comprises:
 \begin{itemize}
-  \item All \poseidon calls from WOTS chain evaluation and XMSS Merkle path.
-  \item $d \leq 3$ additional \poseidon calls for the hypertree path.
+  \item One $\poseidon_{16}$ call for the joint-key commitment: $\poseidon_{16}(r_G, [k_{\min}, 0, \ldots, 0])$.
+  \item For each of the $k$ signers: all \poseidon calls from WOTS chain evaluation and XMSS Merkle path.
+  \item For each of the $k$ signers: $d \leq 3$ additional \poseidon calls for the hypertree authentication path.
 \end{itemize}
-The function \texttt{threshold\_verify\_with\_poseidon\_trace} in
-\texttt{crates/xmss/src/hypertree.rs} performs native verification while
-collecting the full trace:
+The function \texttt{threshold\_verify\_with\_poseidon\_trace} in \texttt{crates/xmss/src/hypertree.rs} performs native verification while collecting the full trace:
 
 \begin{lstlisting}[language=Rust, style=boxed,
-  caption={Trace collection for hypertree path (Rust, \texttt{hypertree.rs})}]
-for sibling in &proof {
+  caption={Trace collection for joint key and hypertree path (Rust, \texttt{hypertree.rs})}]
+// Joint key commitment: poseidon16(r_G, [k_min, 0, ..., 0])
+let k_min_digest: Digest = std::array::from_fn(|i| {
+    if i == 0 { F::from_usize(group.k) } else { F::default() }
+});
+let _ = poseidon16_compress_with_trace(
+    &group.root(), &k_min_digest, &mut poseidon_trace);
+
+// Hypertree authentication path for each signer
+for sibling in &tsig.merkle_proofs[i] {
     let is_left = (idx & 1) == 0;
     current = if is_left {
         poseidon16_compress_with_trace(&current, sibling, &mut poseidon_trace)
@@ -594,189 +610,52 @@ for sibling in &proof {
 }
 \end{lstlisting}
 
-All threshold \poseidon traces are parallelised over groups with Rayon, then
-merged with the raw XMSS traces before being passed to
-\texttt{prove\_execution}.
-
-%\subsection{End-to-End Aggregation with Threshold Groups}
-%\label{subsec:e2e}
-%
-%Figure~\ref{fig:e2e} shows a multi-level aggregation tree where leaf nodes
-%handle raw XMSS signatures and threshold groups, and a root node aggregates
-%their proofs recursively.
-%
-%\begin{figure}[H]
-%\centering
-%\begin{tikzpicture}[node distance=1.1cm and 1.4cm]
-%
-%  %% Leaf 1: raw XMSS only
-%  \node[proof node, fill=green!15] (L1) at (-5.5, 0) {$\pi_1$};
-%  \node[leaf node, above left=0.7cm and 0.1cm of L1]  (r11) {$\sigma_1$};
-%  \node[leaf node, above right=0.7cm and 0.1cm of L1] (r12) {$\sigma_2$};
-%  \draw[arr] (r11) -- (L1);
-%  \draw[arr] (r12) -- (L1);
-%  \node[font=\scriptsize, below=0.2cm of L1] {Raw XMSS leaf};
-%
-%  %% Leaf 2: threshold group
-%  \node[proof node, fill=orange!20] (L2) at (-0.5, 0) {$\pi_2$};
-%  \node[thresh node, above left=0.7cm and 0.0cm of L2] (t1) {$G_1$\\5-of-7};
-%  \node[leaf node, above right=0.7cm and 0.0cm of L2] (r21) {$\sigma_3$};
-%  \draw[arr] (t1)  -- (L2);
-%  \draw[arr] (r21) -- (L2);
-%  \node[font=\scriptsize, below=0.2cm of L2] {Threshold + Raw leaf};
-%
-%  %% Leaf 3: another threshold group
-%  \node[proof node, fill=orange!20] (L3) at (4.5, 0) {$\pi_3$};
-%  \node[thresh node, above left=0.7cm and 0.0cm of L3] (t2) {$G_2$\\3-of-5};
-%  \node[leaf node, above right=0.7cm and 0.0cm of L3] (r31) {$\sigma_4$};
-%  \draw[arr] (t2)  -- (L3);
-%  \draw[arr] (r31) -- (L3);
-%  \node[font=\scriptsize, below=0.2cm of L3] {Threshold + Raw leaf};
-%
-%  %% Root
-%  \node[root box] (Root) at (0, -2.4) {$\pi_{\text{root}}$\\($n = 2 + 1 + r_G + r_{G'} + \ldots$ pubkeys)};
-%  \draw[arr] (L1) -- (Root) node[midway, sloped, font=\scriptsize, above]{rec. child};
-%  \draw[arr] (L2) -- (Root) node[midway, sloped, font=\scriptsize, above]{rec. child};
-%  \draw[arr] (L3) -- (Root) node[midway, sloped, font=\scriptsize, above]{rec. child};
-%
-%  \node[font=\scriptsize, gray, below=0.15cm of Root]
-%    {One SNARK: constant proof size, independent of total validator count};
-%\end{tikzpicture}
-%\caption{Multi-level aggregation tree with threshold groups.
-%         Leaf nodes (orange) embed threshold group verification inline.
-%         The root aggregation node verifies all three child proofs
-%         recursively.  The final proof $\pi_{\text{root}}$ is constant-size
-%         regardless of the total number of validators.}
-%\label{fig:e2e}
-%\end{figure}
-%
-%\subsection{Comparison with the Proof-Based Approach}
-%\label{subsec:comparison}
-%
-%The \texttt{threshold\_main.py} program is a standalone circuit for
-%producing a \texttt{ThresholdAggregatedSig} artifact without embedding the
-%threshold group in a larger aggregation.  Its public input layout is:
-%\[
-%  \underbrace{r_G}_{\text{thresh. root}}\;\;
-%  \underbrace{k_{\min}}_{\text{min. signers}}\;\;
-%  \underbrace{m}_{\text{message}}\;\;
-%  \underbrace{\text{slot}_{lo}, \text{slot}_{hi}}_{\text{slot range}}\;\;
-%  \underbrace{\text{merkle\_chunks}}_{\text{XMSS param}}\;\;
-%  \underbrace{\text{bytecode\_claim}}_{\text{self-referential}}
-%\]
-%The minimum-signer count $k_{\min}$ is committed to the public input,
-%allowing verifiers to enforce the group policy without knowing the full
-%private input.
-%
-%While this standalone circuit is useful for proving threshold policies
-%independently of any parent aggregation, its use as a sub-proof in
-%Approach~B imposes the following penalties (measured in the
-%\texttt{inline-vs-recursive-threshold} benchmark):
-%
-%\begin{center}
-%\begin{tabular}{lcc}
-%\toprule
-%Metric & Approach A (inline) & Approach B (recursive) \\ \midrule
-%Proofs generated & 1 & 2 \\
-%Wall-clock time (5-of-7) & $t_{\text{leaf}}$ & $t_{\text{leaf}} + t_{\text{parent}} \approx 1.8\text{--}2.0 \times t_{\text{leaf}}$ \\
-%Extra proving cycles & 0 & $\sim 10^6$ (parent recursion) \\
-%Extra proof overhead & 0 & $+$200--400 KiB (parent proof) \\
-%API complexity & simple & new proof type + pipeline stage \\
-%\bottomrule
-%\end{tabular}
-%\end{center}
-%
-%The $t_{\text{parent}}$ overhead exists because the parent circuit must
-%execute the full recursion verifier in zkDSL --- including WHIR
-%decommitment verification, Logup argument checks, and SuperSpartan
-%sumcheck verification --- over the child's proof transcript.  This is
-%a fixed cost that scales with the size of the child's SNARK, not with the
-%number of signers.  Since the recursion verifier is the most
-%computationally expensive part of the aggregation circuit, using a full
-%proof layer for each threshold group is impractical when many groups are
-%present.
+%All threshold \poseidon traces are parallelised over groups with Rayon, then merged with the raw XMSS traces before being passed to \texttt{prove\_execution}.
 
 % ═══════════════════════════════════════════════════════════════════════════════
-\section{Implications for Distributed Validators}
-\label{sec:dv}
+\section{Key generation for Distributed Validators}
 % ═══════════════════════════════════════════════════════════════════════════════
 
-\subsection{Key Registration}
-\label{subsec:key-reg}
-
-In the pre-quantum DV model, an operator cluster registers a single BLS key on the Ethereum beacon chain.  Under \leanConsensus, the registration changes: the cluster registers the \emph{hypertree root} $r_G$ along with the threshold parameters $(k,n)$.  This root is a 248-bit hash-based commitment to all $n$ members' $\XMSS$ public keys.
+In the pre-quantum DV model, an operator cluster registers a single BLS key on the Ethereum beacon chain.  Under \leanConsensus, the registration changes: the cluster registers a single 248-bit \emph{joint public key}
+\[
+  \mathsf{joint\_key} = \poseidon_{16}(r_G,\; [k_{\min}, 0, \ldots, 0])
+\]
+that simultaneously commits to the full membership set (via the hypertree root $r_G$) and the minimum signing threshold $k_{\min}$.
 The hypertree is constructed off-chain by any cluster member (or a trusted coordinator) as:
 \begin{enumerate}
   \item Each node independently generates an $\XMSS$ key pair  $(sk_i, pk_i)$ with $pk_i = r_i \in \KB^8$.
   \item All $n$ roots $r_1, \ldots, r_n$ are shared to all nodes that are part of the DV cluster.
-  \item Any member computes $\hypertree$ and the joint key $r_G = \hypertree.\mathsf{Root}$.
-  \item $r_G$ is submitted for registration as the joint public key.
+  \item Any member computes $\hypertree$, derives $r_G = \hypertree.\mathsf{Root}$, and computes $\mathsf{joint\_key}$.
+  \item $\mathsf{joint\_key}$ is submitted for on-chain registration.
 \end{enumerate}
 
 No trusted dealer is required, and no secret is shared between operators: each holds only their own $\XMSS$ key.
 
-\subsection{Signing Protocol}
-\label{subsec:signing-protocol}
-
-During operation, the signing protocol for a slot $s$ proceeds as:
-\begin{enumerate}
-  \item The consensus layer broadcasts the message $m$ (e.g., an attestation
-        beacon block root) and slot $s$.
-  \item Each of the $n$ reachable operators independently signs:
-        $\sigma_i \gets \XMSS.\mathsf{Sign}(sk_i, m, s)$.
-  \item A designated \emph{aggregator} (possibly rotating) collects at
-        least $k$ valid signatures.
-  \item The aggregator constructs $\Sigma = (\mathbf{i}, \boldsymbol{\sigma})$
-        and calls \texttt{aggregate([], [], [(G, sigma)], m, s)}.
-  \item The resulting \texttt{AggregatedSigs} is submitted to the Ethereum
-        consensus layer (or to a parent aggregation node).
-\end{enumerate}
-
-The $\XMSS$ signing operations are entirely independent and can proceed in
-parallel.  The only sequential step is proof generation, which takes
-$O(k)$ XMSS verification costs in the circuit.
+%\subsection{Signing Protocol}
+%\label{subsec:signing-protocol}
 %
-%\subsection{Slashing Protection}
-%\label{subsec:slashing}
+%During operation, the signing protocol for a slot $s$ proceeds as:
+%\begin{enumerate}
+%  \item The consensus layer broadcasts the message $m$ (e.g., an attestation
+%        beacon block root) and slot $s$.
+%  \item Each of the $n$ reachable operators independently signs:
+%        $\sigma_i \gets \XMSS.\mathsf{Sign}(sk_i, m, s)$.
+%  \item A designated \emph{aggregator} (possibly rotating) collects at
+%        least $k_{\min}$ valid signatures.  Each signer also provides their
+%        hypertree Merkle proof $\pi_i$ (the $d$ sibling digests on the path
+%        from their leaf to $r_G$), which they can compute from the shared
+%        roots $r_1,\ldots,r_n$.
+%  \item The aggregator constructs $\Sigma = (\mathbf{i}, \boldsymbol{\sigma}, \boldsymbol{\pi})$
+%        and calls \texttt{xmss\_aggregate([], [], [(G, sigma)], m, s)}.
+%  \item The resulting \aggsig is submitted to the Ethereum
+%        consensus layer (or to a parent aggregation node).
+%\end{enumerate}
 %
-%$\XMSS$ is stateful: each slot index can only be signed once.  Signing the
-%same slot twice (double-voting) risks equivocation.  In a DV cluster, each
-%operator manages their own $\XMSS$ state (the slot counter).  Since operators
-%are independent, there is no risk of one operator causing another's key to
-%be reused.
-%
-%However, the \emph{aggregator} must enforce that no operator submits two
-%different signatures for the same slot.  The circuit does not prevent
-%this by itself --- it verifies whatever XMSS signatures are provided.
-%Slashing protection must be implemented at the protocol layer (e.g., by
-%having operators only sign messages received through an authenticated
-%consensus channel).
-%
-%\subsection{Security Model}
-%\label{subsec:security-model}
-%
-%\begin{definition}[k-of-n Security]
-%  A threshold group $G = (k, n, \hypertree)$ is \emph{$k$-of-$n$ secure}
-%  if: (i) any adversary controlling fewer than $k$ operators cannot produce
-%  a valid threshold signature $\Sigma$; (ii) any subset of $k$ honest
-%  operators can always produce a valid $\Sigma$.
-%\end{definition}
-%
-%Property (i) follows from the existential unforgeability of $\XMSS$:
-%forging a signature $\sigma_i$ without the corresponding $sk_i$ requires
-%breaking the one-wayness of $\poseidon$, which is post-quantum secure under
-%the quantum random oracle model.  Property (ii) holds by construction, since
-%$k$ independent signers can always collect their $\XMSS$ signatures.
-%
-%The in-circuit distinctness check (via the write-once bitmap) prevents an
-%adversary from counting the same signer twice to reach the threshold.
-%The hypertree Merkle proof check prevents claiming that a forged XMSS key
-%belongs to the group.  Together, these constraints mean that the only way
-%to produce a valid threshold proof is to hold at least $k$ distinct private
-%$\XMSS$ keys whose public key digests are leaves of $\hypertree$.
+%The $\XMSS$ signing operations are entirely independent and can proceed in parallel.
+%The only sequential step is proof generation, which takes $O(k)$ XMSS verification costs in the circuit.
 
 % ═══════════════════════════════════════════════════════════════════════════════
-\section{Open Challenges for Distributed Validator Deployment}
+\section{Open Challenges}
 \label{sec:challenges}
 % ═══════════════════════════════════════════════════════════════════════════════
 
@@ -784,7 +663,8 @@ $O(k)$ XMSS verification costs in the circuit.
 \label{subsec:mutability}
 
 \paragraph{The problem.}
-The hypertree root $r_G$ is a static commitment to $n$ specific $\XMSS$ public keys.  Once $r_G$ is registered on-chain, it cannot be updated without a new on-chain transaction.  Real DV clusters need to handle:
+The joint public key $\mathsf{joint\_key} = \poseidon_{16}(r_G, [k_{\min}, 0,\ldots,0])$ is a static commitment to a fixed membership set and a fixed threshold.  Once registered on-chain, it cannot be updated without a new on-chain transaction.
+Real DV clusters need to handle:
 \begin{itemize}
   \item \emph{Member churn}: an operator leaves and is replaced.
   \item \emph{Key rotation}: an operator suspects key compromise and generates a fresh $\XMSS$ key pair.
@@ -792,146 +672,45 @@ The hypertree root $r_G$ is a static commitment to $n$ specific $\XMSS$ public k
 \end{itemize}
 
 \paragraph{Current limitation.}
-The current implementation has no on-chain mechanism for updating $r_G$.
-A cluster that needs to change membership must:
+The current implementation has no on-chain mechanism for updating the joint key.
+A cluster that needs to change membership or threshold must:
 \begin{enumerate}
-  \item Generate a new hypertree $\hypertree'$ with updated members.
-  \item Submit an exit transaction for the old validator (identified by $r_G$).
-  \item Register a new validator with the new joint key $r_G'$.
+  \item Generate a new hypertree $\hypertree'$ with updated members and compute the new joint key.
+  \item Submit an exit transaction for the old validator (identified by its $\mathsf{joint\_key}$).
+  \item Register a new validator with the new joint key.
 \end{enumerate}
 This process requires waiting for the exit queue and incurs a new deposit.
 
-%\paragraph{Potential mitigations.}
-%One direction is a \emph{hierarchical hypertree} with a mutable member list.
-%For instance, a top-level hypertree could commit to a set of \emph{delegation roots}, where each delegation root is itself the root of a smaller hypertree.
-%Key rotation within a delegation would only require updating one leaf of the top-level tree, but the on-chain registration (the top-level root) would need to be updated.
-%
-%A more radical approach uses a hash-based \emph{updatable commitment}: the on-chain registration stores not $r_G$ directly but a hash chain over versioned hypertree roots.
-%Updating the tree produces a new version, and valid proofs for any version in the chain are accepted.
-%This requires protocol-level changes to the Ethereum validator registration.
-%
-%A third approach decouples the identity commitment from the signing key: the on-chain identity is an abstract identifier (e.g., a smart contract address), and the current $\XMSS$ public keys are published in a separate registry.
-%Signers prove membership in the current registry rather than in a fixed tree.
-%This requires a different circuit design (proving registry inclusion rather than hypertree membership) and a trust model for the registry.
 
-%\subsection{Aggregator Role and Incentives}
-%\label{subsec:aggregator}
-%
-%The aggregator collects signatures from operators and generates the SNARK proof.
-%In the current design, this is a centralised role with no redundancy.  If the
-%aggregator fails, no proof is submitted for that slot.  Production deployment
-%requires:
-%\begin{itemize}
-%  \item \emph{Redundant aggregators}: multiple candidates attempt aggregation;
-%        the first valid proof is accepted.
-%  \item \emph{Incentive alignment}: the aggregator must be compensated for
-%        proof generation costs ($O(\text{minutes})$ of computation for a
-%        leaf-level proof with $k = 7$ XMSS verifications).
-%  \item \emph{Aggregator censorship resistance}: if the designated aggregator
-%        is malicious and refuses to include certain operators' signatures, the
-%        cluster may fall below threshold despite having enough honest operators.
-%\end{itemize}
-%
-%\subsection{Proof Latency vs. Slot Time}
-%\label{subsec:latency}
-%
-%Ethereum's slot time is 12 seconds.  The attestation deadline is 4 seconds.
-%Generating a leaf-level SNARK proof with $k = 7$ XMSS verifications currently
-%takes several tens of seconds on commodity hardware (depending on the WHIR
-%code rate and the number of grinding bits).  This is far too slow for
-%real-time attestation.
-%
-%Several approaches to close this gap are being explored:
-%\begin{itemize}
-%  \item \emph{Pre-aggregation}: proof generation can start as soon as $k$
-%        signatures are collected, before the attestation deadline, if the
-%        message is known in advance (e.g., block proposals are known early).
-%  \item \emph{Hardware acceleration}: FPGA/GPU backends for Poseidon hashing
-%        and polynomial arithmetic.
-%  \item \emph{Proof caching and amortisation}: proofs for the same slot's
-%        attestation can be shared across multiple aggregation trees.
-%  \item \emph{Async submission}: submit the aggregated proof asynchronously,
-%        using a delayed settlement protocol (e.g., an optimistic layer that
-%        accepts delayed proofs and penalises dishonest claims).
-%\end{itemize}
-%
-%\subsection{Upgradeability of the SNARK Circuit}
-%\label{subsec:upgradeability}
-%
-%The bytecode of \texttt{main.py} is compiled at deployment time and fixed.
-%Its hash is committed via the self-referential compilation loop.  If a bug
-%is found in the circuit or if XMSS parameters must change (e.g., $V$, $W$,
-%or \texttt{LOG\_LIFETIME}), all on-chain validators must coordinate a
-%migration:
-%\begin{itemize}
-%  \item A new bytecode is compiled with updated parameters.
-%  \item A ``migration epoch'' is agreed upon.
-%  \item All nodes re-prove their signatures using the new circuit.
-%\end{itemize}
-%This is analogous to a hard fork in the proof system.  Ideally, the
-%circuit should be versioned, and the on-chain verifier should accept proofs
-%from any authorised version.  This requires an on-chain registry of valid
-%bytecodes and corresponding verifier keys.
-%
-%\subsection{Maximum Group Size and Weighted Thresholds}
-%\label{subsec:group-size}
-%
-%The current implementation caps the hypertree depth at 3, limiting group size
-%to $n \leq 8$.  For larger DV clusters (e.g., institutional validators with
-%$n = 21$ or $n = 100$ members), this is insufficient.
-%
-%Extending to depth 4 ($n \leq 16$) or depth 5 ($n \leq 32$) requires adding
-%new \texttt{\_hypertree\_verify\_d4} / \texttt{\_hypertree\_verify\_d5} cases to
-%\texttt{threshold\_aggregate.py}.  For very large $n$, the static dispatch
-%becomes unwieldy; a dynamic unroll (as used in the XMSS Merkle verification)
-%should replace it.
-%
-%Additionally, the current design treats all members equally: each member
-%contributes 1 unit toward the threshold.  Institutional DV clusters may
-%want \emph{weighted thresholds} where high-reputation or high-stake
-%operators have more voting power.  This requires replacing the signer count
-%$k$ with a weighted sum $\sum_{i \in \mathbf{i}} w_i \geq k_{\text{min}}$,
-%where weights $w_i$ are committed in the hypertree leaves or in a separate
-%table.
-%
-%\subsection{Formal Security Proofs}
-%\label{subsec:formal-security}
-%
-%The system's security rests on several unproven assumptions:
-%\begin{itemize}
-%  \item The combination of SuperSpartan + WHIR + Logup is sound for the
-%        specific circuit structure used (three table types, specific AIR
-%        degrees).  The individual protocols have security proofs, but
-%        their composition has not been formally analysed in the combined
-%        setting.
-%  \item The self-referential compilation loop converges to the correct
-%        bytecode.  This is asserted by the convergence test in
-%        \texttt{compile\_main\_program\_self\_referential} but not formally
-%        proved.
-%  \item The threshold security of the inline verification is sound under
-%        the write-once memory model of \leanVM.  A formal reduction from
-%        threshold security to the one-wayness of $\poseidon$ would be
-%        desirable.
-%\end{itemize}
-%
-%% ═══════════════════════════════════════════════════════════════════════════════
-%\section{Conclusion}
-%\label{sec:conclusion}
-%% ═══════════════════════════════════════════════════════════════════════════════
-%
-%\leanConsensus{} provides a post-quantum, hash-based aggregation system for
-%Ethereum validator signatures that natively supports DV clusters through the
-%hypertree construction.  The inline threshold verification strategy avoids the
-%$\approx 2\times$ proving overhead of the recursive sub-proof strategy, making
-%the system practical for DV clusters of up to 8 members with a single-circuit
-%design.
-%
-%The main engineering challenges remaining before live deployment are:
-%cluster mutability (key rotation and member churn without on-chain
-%re-registration), proof latency (closing the gap between proving time and
-%the 12-second Ethereum slot time), aggregator redundancy, and formal security
-%proofs for the composite protocol.  These are active areas of research and
-%development within the Obol Network.
+\subsection{Aggregation Throughput and the Stake-Alignment Problem}
+\label{subsec:economics}
+
+\paragraph{Circuit cost of threshold groups.}
+In \leanConsensus, the aggregation proof has a capacity determined by the proving infrastructure.
+Each raw $\XMSS$ signature consumes one unit of circuit capacity (one in-circuit $\XMSS$ verification).
+A $k$-of-$n$ threshold group consumes $k$ units — one per participating signer — while covering a single logical validator slot.
+If $k$ "small" validators (each holding the minimum stake $S$) pool into a DV cluster registered as a single validator with stake $S$, the group consumes $k$ circuit slots for $S$ worth of stake.
+The effective cost ratio is $k$ circuit slots per $S$, versus $1$ circuit slot per $S$ for a raw validator.
+Left unchecked, this would allow validators to consume $k\times$ more proof resources for the same stake contribution, creating a free-rider problem: the aggregation infrastructure is degraded for all participants.
+
+\paragraph{Vitalik's stake-alignment rule.}
+To prevent this, Buterin~\cite{native-dvt} proposes requiring a $k$-of-$n$ DV cluster to hold $n \times S$ in total stake, with the group counted as $n$ virtual validators each holding $S$.
+This aligns the stake contribution with the group size rather than the signer count.
+Under this rule, the proof-slot efficiency (staked ETH per circuit slot consumed per epoch) becomes
+\[
+  \eta_{\mathrm{DV}} \;=\; \frac{n \times S}{k} \;\geq\; S \;.
+\]
+DVs are therefore \emph{at least as circuit-efficient as raw validators per unit of stake}.
+In fact, because the group has $n$ validator-slots but only $k$ circuit slots, it is strictly more efficient whenever $k < n$.
+Concretely, replacing $n$ individual validators by one $k$-of-$n$ DV (with $n \times S$ stake) reduces the epoch-wide circuit load by $n - k$ slots.
+For typical DV parameters, the net gain is 2 circuit slots per DV for $(k,n)=(5,7)$ and 1 slot for $(k,n)=(3,4)$.
+The $n \times S$ rule thus simultaneously eliminates the free-rider problem and improves overall aggregation throughput relative to a same-stake baseline of individual validators.
+
+\paragraph{Exclusion of small stakers.}
+The $n \times S$ requirement carries a substantial access barrier.
+With the current minimal staking balance being 32 ETH, meeting it demands locked capital of $n \times S$ leads to $128\,\mathrm{ETH}$ for a minimal $3$-of-$4$ cluster.
+Individual small stakers, including participants in liquid staking protocols who contribute far less than $32\,\mathrm{ETH}$ apiece, cannot meet this threshold independently.
+A bit less restrictive rule would require only $k \times S$ in stake, since $k$ is the direct driver of circuit cost.
 
 % ─── bibliography ─────────────────────────────────────────────────────────────
 \bibliographystyle{alpha}
