@@ -195,7 +195,7 @@ pub fn xmss_aggregate(
     // Build global_pub_keys as sorted deduplicated union
     let mut global_pub_keys: Vec<XmssPublicKey> = raw_xmss.iter().map(|(pk, _)| pk.clone()).collect();
     for (group, _) in threshold_sigs {
-        global_pub_keys.push(XmssPublicKey { merkle_root: group.root() });
+        global_pub_keys.push(XmssPublicKey { merkle_root: group.joint_key() });
     }
     for child in children.iter() {
         assert!(child.pub_keys.is_sorted(), "child pub_keys must be sorted");
@@ -326,14 +326,17 @@ pub fn xmss_aggregate(
 
     // Threshold source blocks (between raw XMSS and recursive)
     for (group, tsig) in threshold_sigs {
-        let root = XmssPublicKey { merkle_root: group.root() };
-        let pos = global_pub_keys.binary_search(&root).unwrap();
-        claimed.insert(root);
+        let joint_key = XmssPublicKey { merkle_root: group.joint_key() };
+        let pos = global_pub_keys.binary_search(&joint_key).unwrap();
+        claimed.insert(joint_key);
 
         let mut block = vec![];
-        block.push(F::from_usize(tsig.signer_indices.len())); // k
+        block.push(F::from_usize(tsig.signer_indices.len())); // k_actual
+        block.push(F::from_usize(group.k));                   // k_min
         block.push(F::from_usize(group.depth));
         block.push(F::from_usize(pos)); // global_pubkey_idx
+        // r_G hint: the raw hypertree root, for in-circuit joint-key verification
+        block.extend_from_slice(&group.root());
 
         // Leaf indices
         for &leaf_idx in &tsig.signer_indices {

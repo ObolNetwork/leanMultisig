@@ -1,3 +1,4 @@
+use backend::PrimeCharacteristicRing;
 use utils::poseidon16_compress_pair;
 
 use crate::*;
@@ -62,6 +63,14 @@ impl ThresholdGroup {
 
     pub fn root(&self) -> Digest {
         self.hypertree[self.depth][0]
+    }
+
+    /// The group's joint public key: `poseidon16(root, [k_min, 0, ..., 0])`.
+    /// Commits to both the hypertree membership set and the minimum threshold,
+    /// so that in-circuit threshold enforcement is cryptographically binding.
+    pub fn joint_key(&self) -> Digest {
+        let k_min_digest: Digest = std::array::from_fn(|i| if i == 0 { F::from_usize(self.k) } else { F::default() });
+        poseidon16_compress_pair(self.root(), k_min_digest)
     }
 
     pub fn leaves(&self) -> &[Digest] {
@@ -154,6 +163,10 @@ pub fn threshold_verify_with_poseidon_trace(
     message: &[F; MESSAGE_LEN_FE],
 ) -> Result<Poseidon16History, ThresholdVerifyError> {
     let mut poseidon_trace = Vec::new();
+
+    // Trace the joint key commitment: poseidon16(root, [k_min, 0, ..., 0])
+    let k_min_digest: Digest = std::array::from_fn(|i| if i == 0 { F::from_usize(group.k) } else { F::default() });
+    let _ = poseidon16_compress_with_trace(&group.root(), &k_min_digest, &mut poseidon_trace);
 
     for (i, &leaf_idx) in tsig.signer_indices.iter().enumerate() {
         let signer_root = group.leaves()[leaf_idx];

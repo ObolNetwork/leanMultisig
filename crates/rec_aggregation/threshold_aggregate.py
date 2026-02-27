@@ -8,23 +8,38 @@ MAX_THRESHOLD_SIGNERS = 2 ** MAX_THRESHOLD_DEPTH
 @inline
 def threshold_verify_group(all_pubkeys, threshold_data, message, slot_lo, slot_hi, merkle_chunks):
     # threshold_data layout:
-    #   [k | depth | global_pubkey_idx |
-    #    leaf_indices(k) | signer_merkle_roots(k*DIGEST_LEN) |
+    #   [k_actual | k_min | depth | global_pubkey_idx |
+    #    r_G(DIGEST_LEN) | leaf_indices(k) | signer_merkle_roots(k*DIGEST_LEN) |
     #    xmss_sigs(k*SIG_SIZE) | hypertree_proofs(k*depth*DIGEST_LEN)]
 
     k = threshold_data[0]
-    depth = threshold_data[1]
-    global_pubkey_idx = threshold_data[2]
+    k_min = threshold_data[1]
+    depth = threshold_data[2]
+    global_pubkey_idx = threshold_data[3]
 
-    assert 0 < k
+    assert 0 < k_min
+    assert k_min <= k          # enforce minimum threshold
     assert k <= MAX_THRESHOLD_SIGNERS
     assert 0 < depth
     assert depth <= MAX_THRESHOLD_DEPTH
 
-    expected_root = all_pubkeys + global_pubkey_idx * DIGEST_LEN
+    # The registered joint public key commits to both the hypertree root r_G and
+    # k_min: joint_key = poseidon16(r_G, [k_min, 0, ..., 0]).
+    # Verify the r_G hint against the committed joint key so that k_min cannot
+    # be forged independently of the registered public key.
+    r_G_hint = threshold_data + 4
+    k_min_tag = Array(DIGEST_LEN)
+    k_min_tag[0] = k_min
+    for j in unroll(1, DIGEST_LEN):
+        k_min_tag[j] = 0
+    expected_commitment = all_pubkeys + global_pubkey_idx * DIGEST_LEN
+    computed_commitment = Array(DIGEST_LEN)
+    poseidon16(r_G_hint, k_min_tag, computed_commitment)
+    for j in unroll(0, DIGEST_LEN):
+        assert computed_commitment[j] == expected_commitment[j]
 
     # Compute section pointers
-    indices_ptr = threshold_data + 3
+    indices_ptr = threshold_data + 4 + DIGEST_LEN
     roots_ptr = indices_ptr + k
     sigs_ptr = roots_ptr + k * DIGEST_LEN
     proofs_ptr = sigs_ptr + k * SIG_SIZE
@@ -53,9 +68,9 @@ def threshold_verify_group(all_pubkeys, threshold_data, message, slot_lo, slot_h
         computed_root = Array(DIGEST_LEN)
         hypertree_merkle_verify(signer_root, proof, leaf_idx, depth, computed_root)
 
-        # Assert computed root matches the group's expected root
+        # Assert computed root matches the verified r_G hint
         for j in unroll(0, DIGEST_LEN):
-            assert computed_root[j] == expected_root[j]
+            assert computed_root[j] == r_G_hint[j]
 
     return global_pubkey_idx
 
